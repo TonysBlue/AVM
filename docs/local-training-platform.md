@@ -1,10 +1,10 @@
-# LatentLoop 本地训练平台与工程实施方案
+# AVM 本地训练平台与工程实施方案
 
 > 状态：最终目标工程契约
 > 日期：2026-08-20
 > 关联顶层架构：[实时流多模态 LatentLoop 完整方案](realtime-multimodal-latent-loop.md)
-> 输出协议：[直接流式语音实施说明](direct-speech.md) · [统一电脑动作输出协议](unified-action.md)
-> 训练协议：[统一三阶段训练架构](three-stage-training.md) · [Online RL：Online Recurrent PPO 与真实隔离电脑环境](online-recurrent-ppo-training.md)
+> 输出协议：[直接流式语音实施说明](direct-speech.md) · [AVM 契约](avm-contract.md)
+> 训练协议：[统一三阶段训练架构](three-stage-training.md) · [Online RL：Online Recurrent PPO 与实时音视频对话环境](online-recurrent-ppo-training.md)
 > 目标：在本地 WSL2/单 GPU 环境中提供与最终目标架构一致、可恢复、可观测的训练和验证闭环。
 
 ## 1. 设计结论
@@ -27,7 +27,7 @@ $$
 \widehat{P}_{t+1\mid t}=\mathrm{JEPAHead}(H_t)
 $$
 
-$H_t$ 随后同时进入 Speech Head 和 Unified Action Head；训练使用 masked loss 与
+$H_t$ 随后同时进入 Speech Head；训练使用 masked loss 与
 TBPTT，并把结果写入带 lineage 的原子 checkpoint。
 
 PyTorch 负责模型、递归状态、loss、优化和 checkpoint；WebDataset 负责按 episode 顺序提供 unit；Ray 负责 CPU 数据与环境外围任务；W&B Local 负责指标和谱系。RecentKV、C、SlowMemory、H、audio cache 和两个 local state 保留在同一 GPU 进程。
@@ -74,19 +74,19 @@ codec worker health 和 identity 校验通过
 仓库保存代码、配置、文档、测试和索引；大文件位于仓库外：
 
 ```text
-LatentLoop/
+AVM/
 ├── configs/
 ├── docs/
 ├── packages/
 │   ├── contracts/     # 物理信号与控制面 protobuf/类型
-│   ├── model/         # Model Core：C/H/RecentKV/SlowMemory、Speech Head、Action Head
+│   ├── model/         # Model Core：C/H/RecentKV/SlowMemory、Speech Head
 │   ├── media/         # PCM 与媒体时钟校验
 │   ├── data/          # episode、WebDataset、curation、readiness
-│   └── runtime/       # 配置、codec worker、action continuation
+│   └── runtime/       # 配置、codec worker
 ├── systems/
 │   ├── model-service/ # ObservationSignal -> ActuationSignal 推理边界
 │   ├── training/      # Pretrain/SFT/Online RL（Online Recurrent PPO）、checkpoint、评估
-│   └── harness/       # QEMU/KVM、采集、执行、receipt、感知 Judge client
+│   └── harness/       # 音视频采集、播放、receipt、感知 Judge client
 ├── scripts/
 └── tests/
 
@@ -143,16 +143,14 @@ class StreamUnit:
     timestamp_ms: Tensor
     delta_ms: Tensor
     mic_audio: Tensor
-    screen: Tensor
+    video: Tensor
     speech_mode: Tensor
     speech_mode_mask: Tensor
     speech_codes: Tensor
     speech_codec_mask: Tensor
-    action: ActionFrame
-    action_supervision_mask: Tensor
 ```
 
-`screen` 始终为当前 224x224 RGB 像素；采集缺帧时由边界生成黑帧。静态与动态画面
+`video` 始终为当前 224x224 RGB 像素；低帧率复用最新因果帧，缺失或失效显式失败。静态与动态画面
 使用同一视觉编码路径。`delta_ms` 为正，时间戳严格递增；所有 target 都有对应 mask。
 
 ### 5.3 编码和状态顺序
@@ -173,19 +171,13 @@ $$
 \widehat{P}_{t+1\mid t}=\mathrm{JEPAHead}(H_t)
 $$
 
-$$
-U_t = \left(
-\mathrm{SpeechHead}(H_t, \mathrm{speech\_local}_{t-1}),
-\mathrm{ActionHead}(H_t, \mathrm{action\_local}_{t-1})
-\right)
-$$
 
 `P_t` 和 `H_t` 都保存16个 slots，H_t 不能被 pooled summary 替代。audio cache 是
 Perceiver 流式输入状态，不进入顶层认知状态公式。
 
 ### 5.4 Codec 时间对齐
 
-每个 unit 固定一帧 Mimi code。音频、完整屏幕帧、speech mask 和 action mask 都按照同一 unit 时钟对齐，不允许累计四舍五入。
+每个 unit 固定一帧 Mimi code。音频、完整视频帧、speech mask 都按照同一 unit 时钟对齐，不允许累计四舍五入。
 
 ## 6. 公共训练接口
 
@@ -200,7 +192,6 @@ class RecurrentState:
     audio_cache: Tensor
     hidden: Tensor
     speech_local: SpeechLocalState
-    action_local: ActionLocalState
     unit_index: Tensor
 ```
 
@@ -214,7 +205,6 @@ class StepOutput:
     state: RecurrentState
     speech_mode_logits: Tensor
     speech_codec_logits: Tensor
-    action: ActionHeadOutput
     hidden: Tensor
     perceiver_slots: Tensor
     jepa_prediction: Tensor
@@ -250,7 +240,7 @@ MIC_MIXED + SCREEN + TIME
         -> Perceiver(P_t)
 P_t + H_(t-1) + C_(t-1) + RecentKV_(t-1) + SlowMemory_(t-1)
         -> Streaming Backbone -> H_t, C_t, RecentKV_t, SlowMemory_t
-H_t -> Speech Head + Unified Action Head + Value Head + JEPA Head
+H_t -> Speech Head + Value Head + JEPA Head
 Perceiver(O_(t+1)) -> stop-gradient JEPA target
 ```
 
@@ -296,11 +286,10 @@ $$
 
 每 80 ms 预测 mode 和一帧 Mimi codec。SILENCE unit 的 codec mask 为 false；speech local 只负责声学连续性。
 
-### 7.5 Unified Action Head
+### 7.5 AVM 输出边界
 
-所有 action kind 和 kind-conditioned 参数共用 Structured ActionFrame schema、context、
-local state 和 frame joint probability。每 unit frame 立即解码执行；只有 TYPE decoder 的
-UTF-8 pending bytes 跨 unit。Harness 负责 schema、安全和权限校验。
+AVM 继承 LatentLoop 主干并删除动作输出；Speech Head 是唯一运行时输出头。
+没有 ActionFrame、ControlSignal、动作状态或执行 worker。
 
 ## 8. 模型配置档位
 
@@ -326,8 +315,8 @@ Local profile 用于单 GPU 实验，正式容量结论以 Canary GPU smoke 为�
 
 ### 8.3 Canary 正式契约
 
-Canary profile 使用 11,298,250 参数的 192 宽、8 层 Backbone，8 heads、768 FFN、16 个
-Perceiver slots、8 个共享语义 slots，以及正式 codec 与 trajectory/action schema。RecentKV、
+Canary profile 使用 10,170,811 参数的 192 宽、8 层 Backbone，8 heads、768 FFN、16 个
+Perceiver slots、8 个共享语义 slots，以及正式 codec 与 trajectory schema。RecentKV、
 memory horizon、TBPTT 和 PPO window 均为 375 units（30 秒）。该规格按最重的 Online RL
 阶段选择：RTX 2080 SUPER 8 GiB 上，完整 375-unit rollout、冻结 reference、candidate 两个
 PPO epoch、SFT replay/preservation 和 optimizer update 的实测峰值 allocated 约 5.30 GiB、
@@ -345,7 +334,7 @@ candidate 争抢同一张 8 GiB GPU。
 meta.json
 mic.flac
 target_speech.flac
-screen.npz
+video.npz
 timeline.npz
 speech_codes.npy
 turns.json
@@ -363,7 +352,7 @@ turns.json
 
 ### 9.4 数据校验
 
-训练前验证时间戳、音频长度、codec frame 对齐、屏幕帧形状、action grammar、mask、manifest/content hash、license 和 split leakage。损坏 episode 进入 quarantine，不静默跳过。
+训练前验证时间戳、音频长度、codec frame 对齐、视频帧形状、语音 mask、manifest/content hash、license 和 split leakage。损坏 episode 进入 quarantine，不静默跳过。
 
 ## 10. 训练循环
 
@@ -397,11 +386,6 @@ $$
 {}+ \mathcal{L}_{\mathrm{speech\_codec}}
 $$
 
-$$
-\mathcal{L}_{\mathrm{action}}
-= \mathrm{MaskedStructuredActionNLL}
-\left(\mathrm{action\_output}, \mathrm{action\_frame}\right)
-$$
 
 $$
 \mathcal{L}_{\mathrm{JEPA}}
@@ -412,12 +396,10 @@ $$
 $$
 \mathcal{L}_{\mathrm{total}}
 = w_{\mathrm{speech}}\mathcal{L}_{\mathrm{speech}}
-{}+ w_{\mathrm{action}}\mathcal{L}_{\mathrm{action}}
 {}+ w_{\mathrm{JEPA}}^{(\mathrm{stage})}\mathcal{L}_{\mathrm{JEPA}}
 $$
 
-SILENCE unit 的 codec loss 被 mask。Action 参数按 kind 激活，连续参数 NLL 与 rollout
-log-prob 使用同一 bounded 参数化。C 与 SlowMemory 没有 memory probe、write-budget、
+SILENCE unit 的 codec loss 被 mask，PPO 概率同样排除无效 codec token。C 与 SlowMemory 没有 memory probe、write-budget、
 diversity、control 或 confidence loss；JEPA 是 JEPA Head 的单步表示目标，不是独立 memory target。
 
 ### 10.4 梯度与模块影响
@@ -425,19 +407,18 @@ diversity、control 或 confidence loss；JEPA 是 JEPA Head 的单步表示目�
 | 模块 | 监督来源 | 主要影响 |
 |---|---|---|
 | Speech Head | mode/codec loss | speech mode、codec 和局部连续性 |
-| Action Head | structured frame NLL | kind、参数、TYPE continuation |
-| Perceiver | Speech、Action/RL、JEPA source | 多模态观察表示 |
+| Perceiver | Speech/RL、JEPA source | 多模态观察表示 |
 | JEPA Head | JEPA | 从 H 预测单步未来表示 |
-| Backbone | Speech、Action/RL、JEPA source | 共享多模态表示与状态转移 |
+| Backbone | Speech/RL、JEPA source | 共享多模态表示与状态转移 |
 | 语义 slots C | 未来行为与 JEPA source | 长期目标、约束和抽象任务状态 |
 | SlowMemory updater | 未来行为与 JEPA source | 过期 KV 的固定容量关联摘要 |
 | RecentKV | 无参数 loss | 近期精确上下文 |
-| speech/action local | 对应 head loss | 跨帧/跨 unit 连续性 |
+| speech local | 对应 head loss | 跨帧/跨 unit 连续性 |
 
 ### 10.5 长时监督
 
 ```text
-future Speech/Action loss
+future Speech loss
  -> future H
  -> Backbone recurrence
  -> earlier C / RecentKV / SlowMemory
@@ -463,7 +444,7 @@ model weights
 optimizer/scheduler/scaler state
 Python/NumPy/Torch/CUDA RNG
 RecurrentState: C, H, RecentKV, SlowMemory, audio_cache,
-                speech_local, action_local, unit_index
+                speech_local, unit_index
 epoch/shard/sample/unit cursor
 global update and consumed units
 resolved config + config hash
@@ -479,7 +460,7 @@ git commit
 
 ### 11.3 恢复校验
 
-恢复时检查 model shape、unit clock、trajectory/action schema、codec identity、manifest
+恢复时检查 model shape、unit clock、trajectory schema、codec identity、manifest
 hash、config hash 和 parent checkpoint compatibility。递归状态恢复后下一 unit 的
 output/loss 应与连续运行一致。
 
@@ -494,13 +475,13 @@ W&B 只记录观测和谱系，不保存完整原始数据或替代 checkpoint�
 - model/parameter count；
 - GPU、CUDA、PyTorch；
 - seed、split、run/stage identity；
-- total、speech、action、JEPA、RecentKV、SlowMemory、queue 和 system metrics。
+- total、speech、JEPA、RecentKV、SlowMemory、queue 和 system metrics。
 
-原始音视频不上报；屏幕媒体必须脱敏。服务不可用时切换 offline，不中断训练。
+原始音视频不上报；视频媒体必须脱敏。服务不可用时切换 offline，不中断训练。
 
 ## 13. Ray 外围编排
 
-Ray 负责 CPU 数据生成、音频处理、屏幕变化检测、shard 校验、离线评测和环境 Actor。Ray 不负责：
+Ray 负责 CPU 数据生成、音频处理、视频变化检测、shard 校验、离线评测和环境 Actor。Ray 不负责：
 
 - 每个 unit 的核心 train/forward；
 - GPU 参数或 recurrent state；
@@ -515,16 +496,16 @@ CUDA、FP16、codec worker、checkpoint 原子写入和 W&B Local/Offline 可用
 
 ### 14.2 数据与协议
 
-StreamUnit shape、80 ms 时钟、mask、manifest/shard identity、runtime identity、codec identity、action schema 和 split isolation 通过。
+StreamUnit shape、80 ms 时钟、mask、manifest/shard identity、runtime identity、codec identity、model schema 和 split isolation 通过。
 
 ### 14.3 状态闭环
 
 RecentKV 长度不超过配置上限；淘汰只发生在完整 unit 边界；C/H/SlowMemory/local state 形状固定；监督 horizon 内有跨 unit 梯度，horizon 外图已 detach；长流固定容量行为可测。
 
-### 14.4 语音与 action
+### 14.4 全双工音视频对话
 
-speech mode/codebook accuracy、SILENCE codec mask、action kind/参数指标、schema validity、
-TYPE 跨 unit continuation、session/unit 顺序和 Harness safety gate 通过。
+验证语音生成、静默、播放回流、重叠语音、插话停止和恢复回应。
+对不同视频来源执行同一协议测试；测量响应与停止延迟及队列上限。
 
 ### 14.5 性能与稳定性
 
@@ -543,10 +524,10 @@ TYPE 跨 unit continuation、session/unit 顺序和 Harness safety gate 通过�
 
 ## 16. 安全与故障边界
 
-- 原始屏幕和麦克风最小权限保存；
+- 原始视频和麦克风最小权限保存；
 - device/session hash 不可逆；
 - W&B 媒体脱敏；
-- action 风险由 Harness 审批、白名单、速率限制和紧急停止控制；
+- Harness 负责设备生命周期与有界播放，停止时清除未播放语音；
 - 模型 forward 不能绕过 Harness 直接执行操作；
 - 删除数据时同步更新 manifest 和谱系。
 
@@ -554,13 +535,13 @@ TYPE 跨 unit continuation、session/unit 顺序和 Harness safety gate 通过�
 
 ```text
 chronological WebDataset episodes
--> StreamUnit(80 ms mixed mic + screen)
+-> StreamUnit(80 ms mixed mic + video)
 -> Perceiver(O_t) = P_t
 -> Backbone(P_t, H_(t-1), C_(t-1), RecentKV_(t-1), SlowMemory_(t-1))
 -> H_t, C_t, RecentKV_t, SlowMemory_t
--> H_t -> Speech Head + Unified Action Head + Value Head + JEPA Head
+-> H_t -> Speech Head + Value Head + JEPA Head
 -> stopgrad(Perceiver(O_(t+1))) as JEPA target
--> masked Speech/Action/JEPA loss + recurrent rematerialization
+-> masked Speech/JEPA loss + recurrent rematerialization
 -> atomic checkpoint + W&B lineage
 ```
 

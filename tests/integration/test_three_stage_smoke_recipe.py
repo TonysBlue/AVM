@@ -21,7 +21,7 @@ def test_public_smoke_recipe_runs_all_three_stages(tmp_path: Path) -> None:
     experiment_root = tmp_path / "experiments"
     session_manifest = runtime_root / "sessions.jsonl"
     session_manifest.write_text(
-        '{"session_id":"smoke-life","initial_snapshot_id":"snapshot","seed":17}\n',
+        '{"session_id":"smoke-life","scenario_id":"conversation","seed":17}\n',
         encoding="utf-8",
     )
     harness_socket = runtime_root / "harness.sock"

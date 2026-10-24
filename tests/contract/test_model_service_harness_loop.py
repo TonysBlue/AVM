@@ -5,12 +5,10 @@ import time
 
 from contracts import (
     ActuationSignal,
-    ControlKind,
-    ControlSignal,
     MicSignal,
     ObservationSignal,
-    ScreenSignal,
     SpeechSignal,
+    VideoSignal,
 )
 from model_service.client import UnixModelServiceClient
 from model_service.transport.server import UnixModelServer
@@ -18,7 +16,7 @@ from model_service.transport.server import UnixModelServer
 
 class FakeModelService:
     def identity(self) -> dict[str, str]:
-        return {"service": "fake", "protocol_version": "realtime-v2"}
+        return {"service": "fake", "protocol_version": "avm-realtime-v1"}
 
     def open_session(self, session_id: str) -> str:
         return session_id
@@ -31,7 +29,6 @@ class FakeModelService:
             observation.session_id,
             observation.unit_index,
             SpeechSignal(b"y" * 7680, silent=True),
-            (ControlSignal(ControlKind.NOOP, f"{observation.session_id}-event"),),
         )
 
 
@@ -51,9 +48,9 @@ def test_model_service_and_harness_use_one_physical_signal_frame(tmp_path) -> No
         0,
         80,
         MicSignal(b"x" * 7680),
-        ScreenSignal(b"rgb", 1, 1),
+        VideoSignal(b"rgb", 1, 1, captured_at_ms=0, revision=0),
     )
-    assert client.infer(observation).controls[0].kind is ControlKind.NOOP
+    assert client.infer(observation).speech.silent
     assert client.open_session("session") == "session"
-    assert client.identity()["protocol_version"] == "realtime-v2"
+    assert client.identity()["protocol_version"] == "avm-realtime-v1"
     client.close_session("session")

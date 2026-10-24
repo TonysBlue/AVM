@@ -72,8 +72,6 @@ def test_recurrent_rematerialization_matches_direct_unroll(
             direct_state,
             unit.speech_codes,
             speech_teacher_mode=unit.speech_mode,
-            action_teacher_frame=unit.action,
-            action_teacher_mask=unit.action_supervision_mask,
         )
         direct_outputs.append(output)
         direct_state = output.state
@@ -114,10 +112,6 @@ def test_recurrent_rematerialization_matches_direct_unroll(
         )
         assert torch.equal(
             direct_output.speech_codec_logits, rematerialized_output.speech_codec_logits
-        )
-        assert torch.equal(
-            direct_output.action.kind_logits,
-            rematerialized_output.action.kind_logits,
         )
         assert torch.equal(direct_output.jepa_prediction, rematerialized_output.jepa_prediction)
         assert torch.equal(direct_output.value, rematerialized_output.value)

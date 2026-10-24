@@ -1,35 +1,22 @@
 # 当前轨迹契约
 
 监督 episode、SFT 样本和 Online RL 的 Online Recurrent PPO window 统一使用当前轨迹契约。项目只维护这一份
-数据契约，不维护 schema 编号或历史迁移路径。
+数据契约，使用 AVM 新身份，拒绝旧动作资产。
 
 每个 `meta.json` 和 manifest entry 必须包含 `dataset_scale`、
 `sample_kind`、`stage`、`supervision_kind`、`task_id`、`environment_id/version`、
-`protocol_version`、`action_schema_id=structured-action-v1`、codec identity 和完整
+`protocol_version`、`schema_id=avm-episode-v1`、codec identity 和完整
 `runtime_identity`。每个 unit 固定 80 ms、24 kHz 单声道、每 unit 一帧 Mimi。
 
-timeline 按 unit 保存：
+timeline 按 unit 保存 timestamps_ms、delta_ms、speech_mode、speech_mode_mask 和
+speech_codec_mask；video.npz 保存归一化视频，speech_codes.npy 保存 codec targets。
+meta.json 必须包含 schema_id=avm-episode-v1，protocol_version=avm-realtime-v1。
+模型不接收动作、文本或额外音频参考通道。采集 ledger 的 receipts 与在线 RewardEvent
+只属于审计/训练控制面，不写入模型物理输入。processed sample 必须记录
+speech_codes_encoded=true、unit 数、持续时间和 content SHA-256。
 
-```text
-timestamp_ms, delta_ms, dense screen frame
-speech_mode, speech_mode_mask, speech_codes, speech_codec_mask
-action_kind, action_supervision_mask
-action_coordinate_cell, action_coordinate_residual
-action_button, action_button_phase, action_scroll_delta
-action_text_bytes[16], action_text_length
-action_hotkey_keys[8], action_hotkey_length
-```
-
-`NO_ACTION` 是有监督决策；缺失专家 action 标签必须使用
-`action_supervision_mask=false`。参数 mask 由 kind 和 length 确定，不在数据中保存重复
-mask。TYPE continuation 属于按时间线重放得到的 Action local state，不增加公开 frame 字段。
-
-decoded `ControlSignal`、`EnvironmentReceipt` 仅作为审计 metadata；`RewardEvent` 只属于
-在线训练 lineage。reader 不得把它们拼入模型输入。processed sample 必须
-记录 `speech_codes_encoded=true`、unit 数、持续时间和 content SHA-256。
-
-数据准备从 source manifest 直接构建当前 staging/processed shards，经 Mimi worker 和
-structured-action audit 后生成当前 manifest；不提供历史 schema 或 flat-token 转换兼容分支。
+数据准备从具有真实音视频来源锁的 manifest 构建 staging/processed shards，经 Mimi worker、
+音视频审计和 readiness 后进入训练。缺失真实视频不得用示意图、黑帧或 GUI fixture 替代。
 
 ```text
 unit_ms            = 80
@@ -47,39 +34,34 @@ class StreamUnit:
     timestamp_ms: Tensor
     delta_ms: Tensor
     mic_audio: Tensor
-    screen: Tensor
+    video: Tensor
     speech_mode: Tensor
     speech_mode_mask: Tensor
     speech_codes: Tensor
     speech_codec_mask: Tensor
-    action: ActionFrame
-    action_supervision_mask: Tensor
 ```
 
-`delta_ms` 为正，时间戳严格递增；每个 unit 必须有 `[3,224,224]` 屏幕张量。采集缺失时
-输入适配器提供全黑帧并记录控制面统计；模型输入不包含 revision 或 valid 标记。reader 必须
-校验 kind 条件参数、TYPE/HOTKEY length、数值边界和 episode 时间顺序。
+物理 delta_ms 固定 80，时间戳严格递增；每 unit 必须有 [3,224,224] 视频张量。
+视频 source NPZ 的 tick 0 必须存在；低帧率按时间线复用最近因果帧，不以黑帧补缺。
+reader 验证语音 masks、codec 范围、时间顺序、schema 和内容哈希，拒绝 action_* 时间线。
 
 ## 2. Lifetime rollout window
 
-每个 rollout unit 记录 sampled ActionFrame、speech/action old/reference log-prob、value、解码后的
-有序 controls、receipt 和 reward lineage。receipt/reward 不进入 ObservationSignal。
-PPO ratio 分别按 speech unit 和 action frame 计算；kind-conditioned 参数是同一动作的概率
-分解，不是额外环境 step。窗口还保存 policy version、lineage、observation hash chain 和
-reward finalization watermark。
+每 unit 保存采样 speech mode/codes、joint old/reference log-prob、value、receipt 与 reward
+lineage。SILENCE 的策略概率仅含 mode；SPEECH 增加有效 codec 的条件 log-prob 总和。
+窗口保存 policy version、lineage、观测证据链与 reward finalization watermark。
+receipt/reward 不进入 ObservationSignal，JEPA lookahead 不计入 PPO units。
 
 ## 3. Checkpoint identity
 
-checkpoint 只保存当前模型、数据、codec、action 和阶段谱系身份，不写入 format/schema 编号。
-32x32 coordinate grid、每 unit 16 TYPE bytes、最多 8 HOTKEY keys 和 key table identity 仍是
-当前 Action 契约常量。
+checkpoint 使用 model_schema_id=avm-model-v1，并保存数据、codec、阶段与父 checkpoint
+身份。完整恢复检查配置哈希和严格 state-dict。旧 LatentLoop 权重仅能显式迁移到新谱系，
+不得继承动作状态、优化器或旧 rollout。
 
 ## 4. 验证设计
 
-- 当前 episode 写入/读取逐字段往返；
-- 缺失监督与有监督 NO_ACTION 明确区分；
-- kind-conditioned 参数边界及非法冗余参数拒绝；
-- TYPE 跨 unit UTF-8 pending 重放，非 TYPE 切换时不完整序列拒绝；
-- flat arrays、错误 action schema ID 和不完整当前 metadata fail closed；
-- audit metadata 不进入模型输入；
-- checkpoint/data/runtime identity 完全一致。
+- 当前 episode 写入/读取逐字段往返，语音与视频保持同一时间线；
+- 无标签与监督静音明确区分；首帧缺失和未来帧拒绝；
+- 旧动作字段、错误 schema/codec/hash 和不完整 metadata fail closed；
+- 采集审计 metadata 不进入模型输入；
+- checkpoint、数据、runtime 身份一致，迁移建立新 run。

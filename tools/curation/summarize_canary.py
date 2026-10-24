@@ -92,7 +92,6 @@ def train_summary(report_path: Path, checkpoint: Path) -> None:
         f"{metrics.get('speech/no_speech_chunks', 0.0):.0f} silent chunks",
     )
     line("Speech mode accuracy", f"{metrics.get('speech/mode_accuracy', 0.0):.4f}")
-    line("Action token accuracy", f"{metrics.get('action/token_accuracy', 0.0):.4f}")
     line("Checkpoint", str(checkpoint))
     tracking_mode = tracking.get("effective_mode")
     run_url = tracking.get("run_url")
@@ -113,8 +112,7 @@ def evaluate_summary(run_root: Path, max_updates: int) -> None:
             split.capitalize(),
             f"{report['episodes']} episodes, mode accuracy "
             f"{report['speech_mode_accuracy']:.3f}, mean codec accuracy "
-            f"{sum(codec) / max(len(codec), 1):.4f}, "
-            f"action kind accuracy {report['action_kind_accuracy']:.3f}",
+            f"{sum(codec) / max(len(codec), 1):.4f}",
         )
     if max_updates <= 5:
         line("Quality", "pipeline smoke test only; model is not converged")

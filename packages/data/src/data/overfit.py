@@ -3,8 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import torch
-from contracts import ACTION_SCHEMA_ID
-from model.types import ActionFrame, Episode, SpeechMode, StreamUnit
+from model.types import Episode, SpeechMode, StreamUnit
 from runtime.config import DataConfig, ModelConfig
 
 
@@ -56,15 +55,14 @@ class SpeechOverfitDataset:
                 "response_class": response_class,
                 "variant": variant,
                 "stage": "sft",
+                "schema_id": "avm-episode-v1",
                 "dataset_scale": self.data.dataset,
                 "sample_kind": "supervised_episode",
-                "supervision_kind": "speech_action",
-                "action_source": "synthetic_expert",
+                "supervision_kind": "speech",
                 "task_id": f"overfit-task-{episode_index}",
                 "environment_id": "synthetic-test-only",
                 "environment_version": "1",
-                "protocol_version": "realtime-v2",
-                "action_schema_id": ACTION_SCHEMA_ID,
+                "protocol_version": "avm-realtime-v1",
             },
             target_speech=target,
             sample_index_in_shard=episode_index,
@@ -128,7 +126,7 @@ class SpeechOverfitDataset:
             timestamp_ms=torch.tensor([index * self.data.unit_ms]),
             delta_ms=torch.tensor([self.data.unit_ms]),
             mic_audio=microphone[None, index * frame : (index + 1) * frame],
-            screen=torch.zeros(1, 3, self.data.screen_height, self.data.screen_width),
+            video=torch.zeros(1, 3, self.data.video_height, self.data.video_width),
             speech_mode=torch.tensor([int(SpeechMode.SPEECH if speaking else SpeechMode.SILENCE)]),
             speech_mode_mask=torch.tensor([True]),
             speech_codes=torch.zeros(
@@ -137,6 +135,4 @@ class SpeechOverfitDataset:
             speech_codec_mask=torch.full(
                 (1, self.model.speech_frames_per_unit), speaking, dtype=torch.bool
             ),
-            action=ActionFrame.no_action(1),
-            action_supervision_mask=torch.ones(1, dtype=torch.bool),
         )

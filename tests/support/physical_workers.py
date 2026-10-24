@@ -13,7 +13,7 @@ from contracts import (
     EnvironmentReceipt,
     MicSignal,
     ObservationSignal,
-    ScreenSignal,
+    VideoSignal,
 )
 from contracts.framing import frame, read_frame
 from runtime.codec import CodecIdentity
@@ -76,7 +76,7 @@ class PhysicalBackend:
         self.start_count = 0
         self.seen: list[ActuationSignal] = []
 
-    def start_lifetime_session(self, initial_snapshot_id: str, seed: int, session_id: str):
+    def start_lifetime_session(self, scenario_id: str, seed: int, session_id: str):
         self.start_count += 1
         self.session_id = session_id
         return ObservationSignal(
@@ -85,7 +85,7 @@ class PhysicalBackend:
             0,
             80,
             MicSignal(np.zeros(1920, dtype=np.float32).tobytes()),
-            ScreenSignal(b"x" * (224 * 224 * 3), 224, 224),
+            VideoSignal(b"x" * (224 * 224 * 3), 224, 224, captured_at_ms=0, revision=0),
         )
 
     def apply(self, output: ActuationSignal):
@@ -100,7 +100,7 @@ class PhysicalBackend:
                 (output.unit_index + 1) * 80,
                 80,
                 MicSignal(np.zeros(1920, dtype=np.float32).tobytes()),
-                ScreenSignal(b"x" * (224 * 224 * 3), 224, 224),
+                VideoSignal(b"x" * (224 * 224 * 3), 224, 224, captured_at_ms=0, revision=0),
             ),
             receipt,
         )
@@ -177,7 +177,6 @@ class RewardWorker:
                                         "task": 1.0,
                                         "speech_quality": 0.5,
                                         "latency_quality": 0.5,
-                                        "action_efficiency": 0.5,
                                         "safety_quality": 0.0,
                                     },
                                     "spec_id": self.config.training.rl.reward_spec_id,

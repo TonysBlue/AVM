@@ -18,7 +18,6 @@ class Evaluation:
     episodes: int
     speech_mode_accuracy: float
     speech_codec_accuracy: list[float]
-    action_kind_accuracy: float
     speech_silence_precision: float
     speech_silence_recall: float
     passed: bool | None = None
@@ -60,6 +59,7 @@ def load_evaluation_model(
         raise ValueError("evaluation requires a complete current checkpoint")
     metadata = payload.get("metadata", {})
     for field, expected in (
+        ("model_schema_id", "avm-model-v1"),
         ("codec_id", config.data.codec_id),
         ("codec_weight_hash", config.data.codec_weight_hash),
         ("codec_revision", config.data.codec_revision),
@@ -96,7 +96,7 @@ def evaluate_checkpoint(
         if not config.data.shards:
             raise ValueError("evaluation requires WebDataset shards")
         episodes_source = EpisodeShardReader(config.data.shards, config.data, config.model)
-    mode_correct = mode_total = action_correct = action_total = 0
+    mode_correct = mode_total = 0
     codec_correct = torch.zeros(config.model.speech_codebooks, dtype=torch.long)
     codec_total = 0
     silence_tp = silence_pred = silence_target = 0
@@ -112,8 +112,6 @@ def evaluate_checkpoint(
                     state,
                     unit.speech_codes,
                     speech_teacher_mode=unit.speech_mode,
-                    action_teacher_frame=unit.action,
-                    action_teacher_mask=unit.action_supervision_mask,
                 )
                 state = output.state
                 mode = output.speech_mode_logits.argmax(-1)
@@ -130,11 +128,6 @@ def evaluate_checkpoint(
                     .cpu()
                 )
                 codec_total += int(target_codec.sum())
-                action_mask = unit.action_supervision_mask
-                action_correct += int(
-                    ((output.action.kind_logits.argmax(-1) == unit.action.kind) & action_mask).sum()
-                )
-                action_total += int(action_mask.sum())
                 silence_target += int((unit.speech_mode == int(SpeechMode.SILENCE)).sum())
                 silence_pred += int((mode == int(SpeechMode.SILENCE)).sum())
                 silence_tp += int(
@@ -154,7 +147,6 @@ def evaluate_checkpoint(
         episodes,
         mode_correct / max(mode_total, 1),
         codec_accuracy,
-        action_correct / max(action_total, 1),
         silence_precision,
         silence_recall,
         passed,

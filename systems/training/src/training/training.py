@@ -16,19 +16,17 @@ from typing import Any
 import numpy as np
 import torch
 from accelerate import Accelerator
-from contracts import ACTION_SCHEMA_ID, ObservationSignal
+from contracts import ObservationSignal
 from contracts.protocol import observation_to_payload
 from data import EpisodeShardReader, SyntheticEpisodeDataset
 from data.curation.readiness import check_readiness
 from model import (
     StreamingLatentLoop,
-    action_frame_log_prob,
     compute_jepa_loss,
     compute_losses,
     training_output,
 )
 from model.types import (
-    ActionFrame,
     Episode,
     RecurrentState,
     SpeechSamplingConfig,
@@ -72,7 +70,6 @@ def _loss_denominators(units: Sequence[StreamUnit]) -> dict[str, float]:
                 1,
             )
         ),
-        "action": float(max(sum(int(u.action_supervision_mask.sum()) for u in units), 1)),
     }
 
 
@@ -112,31 +109,24 @@ def _rematerialized_segment(
     units: Sequence[StreamUnit],
     state: RecurrentState,
     teacher_codes: Sequence[torch.Tensor | None],
-    *,
-    action_masks: Sequence[torch.Tensor] | None = None,
-    action_frames: Sequence[ActionFrame] | None = None,
 ) -> tuple[tuple[Any, ...], RecurrentState]:
     """Rematerialize each recurrent transition without cutting the segment graph."""
     if not units:
         raise ValueError("rematerialization segment must contain at least one unit")
-    masks = action_masks or [unit.action_supervision_mask for unit in units]
-    frames = action_frames or [unit.action for unit in units]
     state_flat, state_spec = _pytree.tree_flatten(state)
     result_spec: list[Any] = []
 
     def run(*initial_tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
         current = _pytree.tree_unflatten(list(initial_tensors), state_spec)
         outputs: list[Any] = []
-        for unit, codes, action_mask, action_frame in zip(
-            units, teacher_codes, masks, frames, strict=True
+        for unit, codes in zip(
+            units, teacher_codes, strict=True
         ):
             output = model(
                 unit,
                 current,
                 codes,
                 speech_teacher_mode=unit.speech_mode,
-                action_teacher_frame=action_frame,
-                action_teacher_mask=action_mask,
             )
             outputs.append(training_output(output))
             current = output.state
@@ -160,7 +150,6 @@ def _aggregate_update_metrics(
         "speech",
         "speech_mode",
         "speech_codec",
-        "action",
         "jepa",
         "jepa_prediction",
         "jepa_variance",
@@ -172,7 +161,6 @@ def _aggregate_update_metrics(
         metrics[f"train/loss_{name}"] = numerator / denominator if denominator else float("nan")
     speech_valid = sum(item["speech_valid"] for item in records)
     mode_correct = sum(item["mode_correct"] for item in records)
-    action_correct = sum(item["action_correct"] for item in records)
     for codebook, correct in enumerate(
         sum(
             (item["speech_correct"] for item in records),
@@ -187,9 +175,6 @@ def _aggregate_update_metrics(
         {
             "speech/mode_accuracy": float(
                 mode_correct / max(sum(item["mode_valid"] for item in records), 1)
-            ),
-            "action/kind_accuracy": float(
-                action_correct / max(sum(item["action_valid"] for item in records), 1)
             ),
             "speech/valid_frames": float(speech_valid),
             "speech/active_unit_fraction": float(speech_valid / max(target_units, 1)),
@@ -283,7 +268,6 @@ def _checkpoint_metadata(
         algorithm=(
             config.training.rl.algorithm if config.training.stage == "rl" else None
         ),
-        action_schema_id=ACTION_SCHEMA_ID,
         environment_id=config.training.rl.environment_id or None,
         session_manifest_sha256=(
             file_sha256(Path(config.training.rl.session_manifest).expanduser())
@@ -385,7 +369,7 @@ def train(
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
             continue
-        if name.startswith(("speech_head.", "action_head.")):
+        if name.startswith(("speech_head.",)):
             head_parameters.append(parameter)
         else:
             backbone_parameters.append(parameter)
@@ -479,7 +463,7 @@ def train(
                 if not is_resumed_episode or unit_start == 0:
                     recurrent = None
                 # A memory horizon is one autograd segment: detaching at a
-                # shorter sampling window would sever future action/speech
+                # shorter sampling window would sever future speech
                 # The full memory horizon preserves supervision through C_t and SlowMemory.
                 chunk_size = config.training.memory_horizon_units
                 for chunk_start in range(unit_start, len(episode.units), chunk_size):
@@ -501,7 +485,6 @@ def train(
                                 "speech",
                                 "speech_mode",
                                 "speech_codec",
-                                "action",
                                 "jepa",
                                 "jepa_prediction",
                                 "jepa_variance",
@@ -540,7 +523,6 @@ def train(
                                 output,
                                 unit,
                                 config.training.speech_loss_weight,
-                                config.training.action_loss_weight,
                             )
                             for name, value in unit_losses.items():
                                 accumulated = chunk_losses.get(name, torch.zeros_like(value))
@@ -645,13 +627,6 @@ def train(
                                     .item()
                                 ),
                                 "mode_valid": int(unit.speech_mode_mask.sum().item()),
-                                "action_correct": int(
-                                    (output.action.kind_logits.argmax(-1) == unit.action.kind)
-                                    .masked_select(unit.action_supervision_mask)
-                                    .sum()
-                                    .item()
-                                ),
-                                "action_valid": int(unit.action_supervision_mask.sum().item()),
                             }
                         )
                         continue
@@ -673,13 +648,6 @@ def train(
                                 .item()
                             ),
                             "mode_valid": int(moved[-1].speech_mode_mask.sum().item()),
-                            "action_correct": int(
-                                (output.action.kind_logits.argmax(-1) == moved[-1].action.kind)
-                                .masked_select(moved[-1].action_supervision_mask)
-                                .sum()
-                                .item()
-                            ),
-                            "action_valid": int(moved[-1].action_supervision_mask.sum().item()),
                         }
                     )
                     last_metrics = _aggregate_update_metrics(pending_update_metrics, config)
@@ -795,8 +763,8 @@ def initialize_exact_weights(model: StreamingLatentLoop, path: str | Path) -> No
     metadata = payload.get("metadata")
     if not isinstance(metadata, dict):
         raise ValueError("initial checkpoint metadata is incomplete")
-    if metadata.get("action_schema_id") != ACTION_SCHEMA_ID:
-        raise ValueError("initial checkpoint action schema is incompatible")
+    if metadata.get("model_schema_id") != "avm-model-v1":
+        raise ValueError("initial checkpoint AVM model schema is incompatible")
     source = payload.get("model")
     if not isinstance(source, dict):
         raise ValueError("initial checkpoint does not contain a model state")
@@ -821,7 +789,7 @@ def configure_trainable_parameters(model: StreamingLatentLoop, config: ProjectCo
     mode = config.training.backbone_train_mode
     if mode == "all":
         return
-    head_prefixes = ("speech_head.", "action_head.")
+    head_prefixes = ("speech_head.",)
     selective_prefixes = (
         "audio_encoder.",
         "semantic_slot_identity",
@@ -843,7 +811,6 @@ def _sample_logprob(
     output: Any,
     mode: torch.Tensor,
     codes: torch.Tensor,
-    actions: ActionFrame,
     sampling: SpeechSamplingConfig,
 ) -> torch.Tensor:
     temperature = sampling.temperature
@@ -860,12 +827,10 @@ def _sample_logprob(
     codec_lp = torch.where(
         mode.eq(1)[:, None, None], codec_lp, torch.zeros_like(codec_lp)
     )
-    action_lp = action_frame_log_prob(output.action, actions, temperature)
     return torch.cat(
         (
             mode_lp.reshape(mode.shape[0], -1),
             codec_lp.reshape(mode.shape[0], -1),
-            action_lp[:, None],
         ),
         dim=-1,
     )
@@ -875,11 +840,10 @@ def _policy_logprobs(
     output: Any,
     mode: torch.Tensor,
     codes: torch.Tensor,
-    actions: ActionFrame,
     sampling: SpeechSamplingConfig,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    values = _sample_logprob(output, mode, codes, actions, sampling)
-    return values[:, :-1].sum(dim=-1), values[:, -1]
+) -> torch.Tensor:
+    values = _sample_logprob(output, mode, codes, sampling)
+    return values.sum(dim=-1)
 
 
 def _session_specs(path: str) -> list[tuple[str, str, int]]:
@@ -894,7 +858,7 @@ def _session_specs(path: str) -> list[tuple[str, str, int]]:
             values.append(
                 (
                     str(item["session_id"]),
-                    str(item["initial_snapshot_id"]),
+                    str(item["scenario_id"]),
                     int(item.get("seed", 0)),
                 )
             )
@@ -908,12 +872,9 @@ class _PPOUnit:
     observation: ObservationSignal
     mode: torch.Tensor
     codes: torch.Tensor
-    action: ActionFrame
     old_speech_logprob: torch.Tensor
-    old_action_logprob: torch.Tensor
     old_value: torch.Tensor
     reference_speech_logprob: torch.Tensor
-    reference_action_logprob: torch.Tensor
 
 
 @dataclass(slots=True)
@@ -925,29 +886,13 @@ class _CandidateResult:
     metrics: dict[str, float]
 
 
-def _action_sample(action: ActionFrame) -> dict[str, Any]:
-    return {
-        name: value.detach().cpu().tolist()[0]
-        for name, value in action.items()
-    }
-
-
 def _trace_sample(
-    mode: torch.Tensor, codes: torch.Tensor, action: ActionFrame
+    mode: torch.Tensor, codes: torch.Tensor
 ) -> dict[str, Any]:
     return {
         "speech_mode": int(mode.detach().cpu().reshape(-1)[0]),
         "speech_codes": codes.detach().cpu().tolist()[0],
-        "action": _action_sample(action),
     }
-
-
-def _state_pending_utf8(state: RecurrentState) -> bytes:
-    length = int(state.action_local.pending_utf8_length.reshape(-1)[0].item())
-    return bytes(
-        int(value)
-        for value in state.action_local.pending_utf8_bytes[0, :length].tolist()
-    )
 
 
 def _supervised_episode_objectives(
@@ -977,7 +922,6 @@ def _supervised_episode_objectives(
             output,
             unit,
             config.training.speech_loss_weight,
-            config.training.action_loss_weight,
         )["total"]
         for output, unit in zip(outputs, moved, strict=True)
     ]
@@ -1074,12 +1018,8 @@ def _train_ppo_candidate(
             candidate, evaluation_episode, config, device
         )
     old_speech = torch.cat([unit.old_speech_logprob for unit in units]).to(device)
-    old_action = torch.cat([unit.old_action_logprob for unit in units]).to(device)
     reference_speech = torch.cat(
         [unit.reference_speech_logprob for unit in units]
-    ).to(device)
-    reference_action = torch.cat(
-        [unit.reference_action_logprob for unit in units]
     ).to(device)
     last_loss: torch.Tensor | None = None
     last_components: dict[str, torch.Tensor] = {}
@@ -1089,11 +1029,12 @@ def _train_ppo_candidate(
     for _ in range(config.training.rl.ppo_epochs):
         state = window_start_state
         current_speech: list[torch.Tensor] = []
-        current_action: list[torch.Tensor] = []
         current_values: list[torch.Tensor] = []
         outputs: list[Any] = []
         stream_units = [
-            observation_to_stream_unit(item.observation, config).to(device) for item in units
+            replace(
+                observation_to_stream_unit(item.observation, config), speech_mode=item.mode
+            ).to(device) for item in units
         ]
         segment_units = config.model.rematerialization_segment_units
         for segment_start in range(0, len(units), segment_units):
@@ -1104,35 +1045,25 @@ def _train_ppo_candidate(
                 segment,
                 state,
                 [item.codes.to(device) for item in segment_items],
-                action_masks=[
-                    torch.ones_like(item.mode, dtype=torch.bool, device=device)
-                    for item in segment_items
-                ],
-                action_frames=[item.action.to(device) for item in segment_items],
             )
             outputs.extend(segment_outputs)
         for item, output in zip(units, outputs, strict=True):
-            speech_logprob, action_logprob = _policy_logprobs(
+            speech_logprob = _policy_logprobs(
                 output,
                 item.mode.to(device),
                 item.codes.to(device),
-                item.action.to(device),
                 sampling,
             )
             current_speech.append(speech_logprob)
-            current_action.append(action_logprob)
             current_values.append(output.value)
         ppo_inputs = {
             "current_speech": torch.cat(current_speech),
             "old_speech": old_speech,
-            "current_action": torch.cat(current_action),
-            "old_action": old_action,
             "advantage": advantages,
             "current_value": torch.cat(current_values),
             "old_value": old_value,
             "value_target": value_targets,
             "reference_speech": reference_speech,
-            "reference_action": reference_action,
         }
         invalid_inputs = [
             name
@@ -1150,20 +1081,16 @@ def _train_ppo_candidate(
         ppo_loss, components = recurrent_ppo_loss(
             ppo_inputs["current_speech"],
             ppo_inputs["old_speech"],
-            ppo_inputs["current_action"],
-            ppo_inputs["old_action"],
             ppo_inputs["advantage"],
             ppo_inputs["current_value"],
             ppo_inputs["old_value"],
             ppo_inputs["value_target"],
             ppo_inputs["reference_speech"],
-            ppo_inputs["reference_action"],
             clip_epsilon=config.training.rl.clip_epsilon,
             value_coef=config.training.rl.value_coef,
             entropy_coef=config.training.rl.entropy_coef,
             reference_kl_beta=config.training.rl.reference_kl_beta,
-            entropy=-0.5
-            * (ppo_inputs["current_speech"] + ppo_inputs["current_action"]),
+            entropy=-ppo_inputs["current_speech"],
         )
         on_policy_jepa, _ = _sequence_jepa_loss(
             candidate,
@@ -1233,7 +1160,6 @@ def _train_ppo_candidate(
         )
         post_state = window_start_state
         post_speech: list[torch.Tensor] = []
-        post_action: list[torch.Tensor] = []
         for item in units:
             stream_unit = observation_to_stream_unit(item.observation, config).to(device)
             output = candidate.forward_step(
@@ -1241,28 +1167,17 @@ def _train_ppo_candidate(
                 post_state,
                 speech_teacher_codes=item.codes.to(device),
                 speech_teacher_mode=item.mode.to(device),
-                action_teacher_frame=item.action.to(device),
-                action_teacher_mask=torch.ones_like(
-                    item.mode, dtype=torch.bool, device=device
-                ),
             )
             post_state = output.state
-            speech_logprob, action_logprob = _policy_logprobs(
+            speech_logprob = _policy_logprobs(
                 output,
                 item.mode.to(device),
                 item.codes.to(device),
-                item.action.to(device),
                 sampling,
             )
             post_speech.append(speech_logprob)
-            post_action.append(action_logprob)
-        post_reference_kl = 0.5 * (
-            sampled_reference_kl(
-                torch.cat(post_speech), ppo_inputs["reference_speech"]
-            )
-            + sampled_reference_kl(
-                torch.cat(post_action), ppo_inputs["reference_action"]
-            )
+        post_reference_kl = sampled_reference_kl(
+            torch.cat(post_speech), ppo_inputs["reference_speech"]
         )
     eval_ratio = candidate_eval_loss / baseline_eval_loss.clamp_min(1e-8)
     metrics = {
@@ -1345,7 +1260,7 @@ def train_online_ppo(
     seed_everything(config.data.seed)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     policy = model or StreamingLatentLoop(config.model)
-    session_id, snapshot_id, seed = sessions[0]
+    session_id, scenario_id, seed = sessions[0]
     resume_state: dict[str, Any] | None = None
     resume_metadata: CheckpointMetadata | None = None
     if resume:
@@ -1461,7 +1376,6 @@ def train_online_ppo(
         identity.get("environment_id") != rl.environment_id
         or identity.get("environment_version") != rl.environment_version
         or identity.get("protocol_version") != rl.environment_protocol_version
-        or identity.get("action_schema_id") != ACTION_SCHEMA_ID
     ):
         raise ValueError("Harness environment identity does not match configuration")
     if resume:
@@ -1505,14 +1419,15 @@ def train_online_ppo(
             if int(sample["speech_mode"]) == 1:
                 codes = torch.tensor([sample["speech_codes"]], dtype=torch.long)
                 speech_history.append(codes.transpose(1, 2))
+            else:
+                speech_history.clear()
         observation = env.resume_lifetime_session(
             session_id,
             next_unit,
-            pending_utf8=_state_pending_utf8(policy_state),
             speech_history=speech_history,
         )
     else:
-        observation = env.start_lifetime_session(snapshot_id, seed, session_id)
+        observation = env.start_lifetime_session(scenario_id, seed, session_id)
         policy_state = policy.initial_state(1, device)
         reference_state = reference.initial_state(1, device)
     last_metrics: dict[str, float] = {}
@@ -1562,51 +1477,45 @@ def train_online_ppo(
         with torch.no_grad():
             generated = policy.generate_step(unit, policy_state, sampling)
             policy_state = generated.output.state
-            mode, codes, action = (
+            mode, codes = (
                 generated.speech_mode,
                 generated.speech_codes,
-                generated.action_frame,
             )
-            speech_logprob, action_logprob = _policy_logprobs(
-                generated.output, mode, codes, action, sampling
+            speech_logprob = _policy_logprobs(
+                generated.output, mode, codes, sampling
             )
             reference_output = reference.forward_step(
                 unit,
                 reference_state,
                 speech_teacher_codes=codes,
                 speech_teacher_mode=mode,
-                action_teacher_frame=action,
-                action_teacher_mask=torch.ones_like(mode, dtype=torch.bool),
             )
             reference_state = reference_output.state
-            reference_speech, reference_action = _policy_logprobs(
-                reference_output, mode, codes, action, sampling
+            reference_speech = _policy_logprobs(
+                reference_output, mode, codes, sampling
             )
-        next_observation, receipt, _ = env.step(observation, mode, codes, action)
+        next_observation, receipt, _ = env.step(observation, mode, codes)
         if receipt.infrastructure_failure:
             raise RuntimeError(
                 f"physical rollout infrastructure failure: {receipt.infrastructure_failure}"
             )
         if not receipt.accepted:
             raise RuntimeError(
-                f"physical rollout action rejected: {receipt.safety_violation or 'unknown'}"
+                f"physical rollout playback rejected: {receipt.safety_violation or 'unknown'}"
             )
         policy_trace.append(
             unit_index=observation.unit_index,
             policy_version=policy_version,
             observation_payload_sha256=record.payload_sha256,
-            sample=_trace_sample(mode, codes, action),
+            sample=_trace_sample(mode, codes),
         )
         item = _PPOUnit(
             observation,
             mode.cpu(),
             codes.cpu(),
-            action.cpu(),
             speech_logprob.cpu(),
-            action_logprob.cpu(),
             generated.output.value.cpu(),
             reference_speech.cpu(),
-            reference_action.cpu(),
         )
         train_state["consumed_units"] += 1
         observation = next_observation

@@ -11,11 +11,11 @@ session 和 scenario 都写入选择账本。episode 时长是完整时间线，
 | public real speech | 0.30 h | 0.24 h / 0.06 h |
 | synthetic computer dialogue | 0.50 h | 0.40 h / 0.10 h |
 | adjacent conversational turns | 0.15 h | 0.12 h / 0.03 h |
-| screen-conditioned tasks | 0.05 h | 0.04 h / 0.01 h |
+| video-conditioned tasks | 0.05 h | 0.04 h / 0.01 h |
 
 每个 bucket 再按 80/10/10 切 train/validation/test。中文占 80%，英文占 20%。
 短/中/长 episode 为 60%（4–16 s）、25%（16–32 s）、15%（32–60 s）。Canary 的
-电脑助手时间线约 55%，因为公开真实语音和相邻轮次合计 45%；不把这组配方宣称成 70%。
+合成对话时间线约 55%，因为公开真实语音和相邻轮次合计 45%；不把这组配方宣称成 70%。
 
 当前数据配方不加入播放回流、显式噪声增强、重叠说话、打断和反馈环路；这些由后续声学环境闭环覆盖。每个 episode
 只有一路 `mic_audio`，助手目标只出现在 `target_speech`，运行时不经过 TTS。
@@ -60,7 +60,7 @@ uv run data audit-canary-data --config "$CFG" --root "$ROOT" --fixture
 - `build-canary-text`：生成 120 条计划（96 中文、24 英文）。计划由固定模板和哈希确定，自动进入合成；不依赖人工审核。
 - `select-canary-voices --library voices.json`：要求恰好一个获得授权的固定助手声线，以及按 split 隔离的中英文用户声线。声线 prompt 和授权记录必须有 SHA-256。
 - `synthesize-canary --synth-command CMD --asr-command CMD --model-sha256 HASH`：调用 CosyVoice 和 ASR。ASR 中文 CER、英文 WER 单条超过 20% 时重试一次后剔除；聚合门禁为 8%。合成适配器还必须写同名 `.metrics.json`，其中 `integrated_lufs` 在 `-23 +/- 1 LUFS` 内。
-- `build-canary-manifest --normalize-command CMD --screen-command CMD`：normalizer 负责 24 kHz mono PCM16 FLAC、峰值、loudness 和 source inventory；screen adapter 只允许隔离 sandbox 的稀疏屏幕帧。
+- `build-canary-manifest --normalize-command CMD --video-command CMD`：normalizer 负责 24 kHz mono PCM16 FLAC、峰值、loudness 和 source inventory；video adapter 只允许隔离 sandbox 的稀疏视频帧。
 
 源清单扩展字段包括 `source_version`、`source_url`、`source_utterance_ids`、
 `template_id`、`intent`、`user_voice_id`、`assistant_voice_id`、`turns`、
@@ -71,7 +71,7 @@ uv run data audit-canary-data --config "$CFG" --root "$ROOT" --fixture
 `target_segments` 的 `start_sample` 必须落在 80 ms tick。包含最后助手采样的帧是
 assistant segment 内的 unit 标记为 `speech_mode=SPEECH`，其余 unit 标记为
 `speech_mode=SILENCE`；codec mask 只在 SPEECH unit 有效。
-其他帧为 false。公共真实输入 episode 的 target 全静音、没有 codec loss。Action/Memory
+其他帧为 false。公共真实输入 episode 的 target 全静音、没有 codec loss。Memory
 mask 在 Canary 保持 false，`PAUSE` 不使用。
 
 ## 审计和训练导入
@@ -100,13 +100,13 @@ uv run data prepare-canary-data --config "$CFG" --root "$ROOT" \
   --asr-command 'path/to/asr-adapter' \
   --model-sha256 '<64-char-cosyvoice-model-sha256>' \
   --normalize-command 'path/to/normalizer-adapter' \
-  --screen-command 'path/to/screen-adapter' \
+  --video-command 'path/to/video-adapter' \
   --socket "$HOME/latentloop-data/runtime/sockets/mimi.sock" --encode
 ```
 
 `prepare-canary-data` 会完成 Canary 并通过自动审计；`--encode` 会为 train、validation、test
 生成 staging 和 processed shards。外部数据、CosyVoice、ASR、
-屏幕采集和 Mimi 仍必须提供真实适配器和锁定哈希，命令不会用 fixture 冒充生产产物。
+视频资产和 Mimi 仍必须提供真实适配器和锁定哈希，命令不会用 fixture 冒充生产产物。
 
 训练前最后执行 fail-closed 检查：
 

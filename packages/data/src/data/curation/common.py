@@ -10,7 +10,7 @@ from typing import Any
 
 DATASETS = ("canary",)
 SPLITS = ("train", "validation", "test")
-CATEGORIES = ("public_speech", "synthetic_dialogue", "adjacent_turns", "screen_task")
+CATEGORIES = ("public_speech", "synthetic_dialogue", "adjacent_turns", "video_task")
 LANGUAGES = ("zh", "en")
 
 

@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from model.types import ActionLocalState, LayerKV, RecurrentState, SlowMemoryState, SpeechLocalState
+from model.types import LayerKV, RecurrentState, SlowMemoryState, SpeechLocalState
 from torch import nn
 
 
@@ -34,7 +34,7 @@ class CheckpointMetadata:
     parent_sha256: str | None = None
     stage: str = "pretrain"
     algorithm: str | None = None
-    action_schema_id: str = "structured-action-v1"
+    model_schema_id: str = "avm-model-v1"
     reference_checkpoint_sha256: str | None = None
     environment_id: str | None = None
     session_manifest_sha256: str | None = None
@@ -83,15 +83,6 @@ def _serialize_state(state: RecurrentState | None) -> dict[str, Any] | None:
             "temporal": state.speech_local.temporal.cpu(),
             "previous_codes": state.speech_local.previous_codes.cpu(),
         },
-        "action_local": {
-            "previous_frame_embedding": state.action_local.previous_frame_embedding.cpu(),
-            "type_decoder_state": state.action_local.type_decoder_state.cpu(),
-            "pending_utf8_bytes": state.action_local.pending_utf8_bytes.cpu(),
-            "pending_utf8_length": state.action_local.pending_utf8_length.cpu(),
-            "type_active": state.action_local.type_active.cpu(),
-            "held_buttons": state.action_local.held_buttons.cpu(),
-            "held_keys": state.action_local.held_keys.cpu(),
-        },
         "unit_index": state.unit_index.cpu(),
     }
 
@@ -117,15 +108,6 @@ def _deserialize_state(
             temporal=payload["speech_local"]["temporal"].to(device),
             previous_codes=payload["speech_local"]["previous_codes"].to(device),
         ),
-        action_local=ActionLocalState(
-            previous_frame_embedding=payload["action_local"]["previous_frame_embedding"].to(device),
-            type_decoder_state=payload["action_local"]["type_decoder_state"].to(device),
-            pending_utf8_bytes=payload["action_local"]["pending_utf8_bytes"].to(device),
-            pending_utf8_length=payload["action_local"]["pending_utf8_length"].to(device),
-            type_active=payload["action_local"]["type_active"].to(device),
-            held_buttons=payload["action_local"]["held_buttons"].to(device),
-            held_keys=payload["action_local"]["held_keys"].to(device),
-        ),
         unit_index=payload["unit_index"].to(device),
     )
 
@@ -133,6 +115,8 @@ def _deserialize_state(
 def _parse_metadata(payload: Any) -> CheckpointMetadata:
     if not isinstance(payload, dict):
         raise ValueError("checkpoint metadata is incomplete")
+    if payload.get("model_schema_id") != "avm-model-v1":
+        raise ValueError("checkpoint AVM model schema is missing or incompatible")
     if "objective" in payload:
         raise ValueError(
             "checkpoint objective is removed; create a new stage/algorithm checkpoint"
@@ -283,7 +267,7 @@ class CheckpointManager:
             "codec_revision",
             "stage",
             "algorithm",
-            "action_schema_id",
+            "model_schema_id",
             "reference_checkpoint_sha256",
             "environment_id",
             "session_manifest_sha256",

@@ -1,13 +1,13 @@
-spec_id: realtime-v2
+spec_id: avm-dialogue-v1
 input:
   type: canonical_observation_signal_protobuf
   allowed_fields:
     - timestamp_ms
     - delta_ms
     - mixed_microphone_pcm
-    - screen_pixels
+    - video_pixels
   forbidden_fields:
-    - sampled_action
+    - sampled_speech_tokens
     - actuation_signal
     - environment_receipt
     - task_manifest
@@ -22,9 +22,8 @@ reward:
   task_range: [0.0, 1.0]
   speech_quality_range: [0.0, 1.0]
   latency_quality_range: [0.0, 1.0]
-  action_efficiency_range: [0.0, 1.0]
   safety_quality_range: [-1.0, 0.0]
-  interaction: 0.4 * speech_quality + 0.3 * latency_quality + 0.3 * action_efficiency
+  interaction: 0.5 * speech_quality + 0.5 * latency_quality
   total: task + 0.2 * interaction + safety_quality
 events:
   statuses: [provisional, finalized]

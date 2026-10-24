@@ -15,7 +15,7 @@ members = [
     "latentloop-media",
     "latentloop-model",
     "latentloop-runtime",
-    "latentloop-workspace",
+    "avm-workspace",
     "model-service",
     "training",
 ]
@@ -547,7 +547,7 @@ requires-dist = [
 ]
 
 [[package]]
-name = "latentloop-workspace"
+name = "avm-workspace"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

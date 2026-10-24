@@ -8,7 +8,7 @@ CATEGORY_FRACTIONS = {
     "public_speech": 0.30,
     "synthetic_dialogue": 0.50,
     "adjacent_turns": 0.15,
-    "screen_task": 0.05,
+    "video_task": 0.05,
 }
 LANGUAGE_FRACTIONS = {"zh": 0.80, "en": 0.20}
 SPLIT_FRACTIONS = {"train": 0.80, "validation": 0.10, "test": 0.10}

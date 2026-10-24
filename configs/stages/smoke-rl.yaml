@@ -18,7 +18,7 @@ training:
     reward_socket: ~/latentloop-data/runtime/smoke-test-only/reward.sock
     environment_id: test-physical
     environment_version: "1"
-    environment_protocol_version: realtime-v2
+    environment_protocol_version: avm-realtime-v1
     judge_revision: test-only
     rubric_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     timeline_root: ~/latentloop-data/runtime/smoke-test-only/timeline

@@ -45,7 +45,6 @@ def test_accepted_candidate_does_not_mutate_recurrent_state(smoke_config) -> Non
     assert applied
     assert recurrent_state.unit_index.item() == 37
     assert torch.equal(recurrent_state.semantic_memory, before.semantic_memory)
-    assert torch.equal(recurrent_state.action_local.held_buttons, before.action_local.held_buttons)
 
 
 def test_synthetic_ppo_guard_episodes_are_independent(smoke_config) -> None:

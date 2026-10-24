@@ -2,28 +2,24 @@
 
 ## 目标与边界
 
-数据采集系统用于生产与最终运行时一致的专家交互轨迹。首版只支持专家扮演助手：用户语音由真实麦克风输入，专家通过采集控制台观察 QEMU、执行电脑操作并说出助手回复。采集器不加载模型，不调用 Model Service，不读取 DOM、可访问性树或隐藏 evaluator 状态。
-
-所有输入都必须经过 Harness 的物理边界。专家动作先编码为当前 `structured-action-v1` 的 `ActionFrame`，再由 Harness 解码为 `ControlSignal`、通过安全门和 QMP 执行。专家语音经 SPICE/虚拟声卡播放，环境声音和播放回流只由真实 mic 采集为唯一 `ObservationSignal.mic`。
+采集系统生产通用全双工音视频对话轨迹。专家扮演助手，用户与专家边听、边看、边说。
+采集器不加载模型，不调用 Model Service，不读取 GUI/DOM 或隐藏 evaluator 状态。
+专家只提供每 unit 的 SpeechSignal；Harness 持续采集混合音频与通用视频并播放专家语音。
+摄像头、一般视频流和屏幕共享使用同一 VideoSignal，播放回流通过唯一 mic 通道进入输入。
 
 ## 端到端时序
 
 ```text
-Task + QEMU snapshot
-        |
-start_lifetime_session
-        |
-专家 speech -> SPICE playback -> QEMU audio environment
-专家 action -> ActionFrame -> ControlSignal -> Harness/QMP
-        |
-每 80 ms: capture mixed mic + screen + time
-        |
-append observation/action/receipt -> hash chain
-        |
-seal session -> Mimi encode -> current WebDataset episode
+scenario_id + real audiovisual sources
+  -> start_lifetime_session
+  -> expert speech PCM -> bounded playback -> mixed microphone feedback
+  -> every 80 ms: mixed mic + causal video + time
+  -> append observation/speech/receipt hash chain
+  -> seal -> Mimi encode -> AVM WebDataset
 ```
 
-session 是单一连续 lifetime。第 `t` 个动作的 receipt 与第 `t+1` 个 observation 成对保存；动作、播放和 observation 不允许跨 session 或跳 unit。
+单一 lifetime 内 observation、speech、receipt 与下一 observation 按 unit 连续记录。
+采集不等待专家语音播放结束；源断连、背压或时钟错误使会话失败。
 
 ## 原始 ledger
 
@@ -39,45 +35,38 @@ session 是单一连续 lifetime。第 `t` 个动作的 receipt 与第 `t+1` 个
   sealed.json
 ```
 
-`transitions.jsonl` 保存 unit、payload SHA-256、前序/当前 hash chain、结构化 ActionFrame 和 speech 静音标记。protobuf payload 保存 canonical observation、实际 actuation 和 Harness receipt。`sealed.json` 只有在 unit 连续、TYPE UTF-8 状态闭合且存在至少一个完整 transition 时生成。
+`transitions.jsonl` 保存 unit、payload SHA-256、前序/当前 hash chain和 speech 静音标记。protobuf payload 保存 canonical observation、实际 actuation 和 Harness receipt。`sealed.json` 只有在 unit 连续且存在至少一个完整 transition 时生成。
 
 ## 训练导出
 
-封存后由 `episode_from_capture` 转换成当前 `Episode/StreamUnit`，沿用既有 WebDataset、Mimi 编码、manifest、audit 和 readiness。模型输入仍只有 mixed mic、screen 和 time；专家动作、播放参考、receipt、设备诊断属于监督或审计 metadata。导出样本的 `action_supervision_mask` 为 true，speech mask 按每 unit 的实际播放语音设置。
+episode_from_capture 转换为 Episode/StreamUnit，沿用 WebDataset、Mimi、manifest、audit 和
+readiness。输入仅含 mixed mic、video 和 time；目标语音只用于编码与监督。
+语音 mode/codec masks 按实际专家语音设置，receipt 和设备诊断仅属于原始 ledger 审计。
+导出 identity 为 avm-episode-v1 / avm-realtime-v1，禁止动作标签。
 
 ## 接口与失败策略
 
-- `ExpertCaptureSession.start()` 创建 Harness lifetime 并写入 unit 0 observation。
-- `step(ActionFrame, SpeechSignal)` 解码动作、调用 Harness、写入下一 observation 和 receipt。
-- `finish(metadata)` 校验 pending UTF-8 已清空并封存 ledger，随后可导出 episode。
-- 任意 identity、时序、音频 clock、SafetyGate、SPICE、QMP 或 mic/screen 采集错误都停止 session；未封存目录不得进入 manifest。
-- 不提供 fake backend 作为正式回退；fake 只在显式测试中注入。
+- start() 创建 Harness lifetime 并写入 unit 0。
+- step(SpeechSignal) 提交专家语音，写入下一 observation 和 receipt。
+- finish(metadata) 验证时序、身份并封存；未封存目录不得进入 manifest。
+- 设备、协议、顺序、音频或视频失败立即停止，不回退 fixture。
 
-公共命令读取采集控制台持续写出的 JSONL；`--input -` 表示标准输入。每行必须包含
-`action_frame` 和一帧 80 ms 的 `speech_pcm_b64`，没有语音时仍提供全零 PCM 并设置
-`speech_silent=true`：
+JSONL 每行提供 speech_pcm_b64 和 speech_silent；静音必须提供全零 80 ms PCM。
 
 ```bash
-uv run data capture \
-  --config configs/canary.yaml \
+uv run data capture --config configs/canary.yaml \
   --harness-socket "$HOME/latentloop-data/runtime/canary/harness-control.sock" \
-  --snapshot canary-base --session-id expert-001 --lineage-id capture-001 \
-  --task-id task-001 --split train \
+  --scenario conversation --session-id expert-001 --lineage-id capture-001 \
+  --task-id dialogue-001 --split train \
   --ledger "$HOME/latentloop-data/datasets/canary/capture/expert-001" \
   --output "$HOME/latentloop-data/datasets/canary/shards/staging/sft/sft-%06d.tar" \
-  --input - \
-  --viewer-socket "$HOME/latentloop-data/runtime/canary/qemu/spice.sock"
+  --input -
 ```
 
-该命令只生成 `speech_codes_encoded=false` 的 staging shard；进入正式 SFT 前仍必须通过既有
-Mimi encode、audit、manifest 和 readiness 路径。
+该命令只生成 speech_codes_encoded=false 的 staging shard，正式训练仍要求完整编码与审计。
 
 ## 运行与验收
 
-专家控制台只负责采集键鼠和麦克风事件，不直接操作 QEMU。QEMU 屏幕通过 WSLg 下的 `virt-viewer` 观察：
-
-```bash
-remote-viewer "spice+unix://$HOME/latentloop-data/runtime/canary/qemu/spice.sock"
-```
-
-采集验收至少包含：80 ms/24 kHz 对齐、连续 hash chain、动作 receipt identity、动作后屏幕 observation、播放后 mic 回流延迟，以及 QEMU/SPICE/QMP/audio bridge 健康检查。
+先配置真实对话设备和 scenario，再启动 harness serve。摄像头或共享视频的查看由采集端
+应用负责，不依赖 QEMU/SPICE。验收 80 ms/24 kHz 对齐、连续证据链、语音/receipt identity、
+播放回流延迟、视频复用与失效、插话时及时停止，以及结束后的线程与进程清理。

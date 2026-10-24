@@ -11,10 +11,10 @@
 - `uv`、Git、curl，以及至少 20 GB 可用磁盘
 - 可访问 GitHub 和 Hugging Face
 - 可选：W&B Local 已在 `http://127.0.0.1:8080` 运行并完成 CLI 登录
-- Canary Online RL（Online Recurrent PPO）必须连接真实隔离电脑环境 control socket
+- Canary Online RL（Online Recurrent PPO）必须连接实时音视频对话环境 control socket
   `~/latentloop-data/runtime/canary/harness-control.sock` 和 Reward Judge socket
   `~/latentloop-data/runtime/canary/reward-judge.sock`，并准备包含唯一 lifetime
-  `session_id/initial_snapshot_id/seed` 的 session manifest；
+  `session_id/scenario_id/seed` 的 session manifest；
   连接失败不会回退到 fixture 或离线 rollout。
 
 默认产物位于：
@@ -31,10 +31,10 @@
 ## 一键执行
 
 首次运行可将三个 stage 的 update 数覆盖为 1，验证完整 Pretrain → SFT → Online RL 闭环。
-离线 tracking 不要求 W&B 登录，但 Online RL（Online Recurrent PPO）仍必须连接真实隔离环境：
+离线 tracking 不要求 W&B 登录，但 Online RL（Online Recurrent PPO）仍必须连接实时对话环境：
 
 ```bash
-cd ~/LatentLoop
+cd ~/AVM
 scripts/prepare-data.sh canary all
 scripts/run-training.sh --recipe configs/recipes/canary.yaml --run-id canary-001 \
   --set training.max_updates=1 --set training.checkpoint_every=1 \
@@ -110,12 +110,12 @@ Pretrain 从随机初始化开始；SFT 自动使用 Pretrain checkpoint；Onlin
 SFT checkpoint 作为 policy 和冻结 reference。
 
 三个正式 stage 使用同一条连续 episode 路径：按时间顺序处理每个 episode，持续传递
-RecentKV、C、SlowMemory、H、speech-local 和 action-local state。Canary 配置的
+RecentKV、C、SlowMemory、H、speech-local state。Canary 配置的
 `tbptt_units=375` 与
 `memory_horizon_units=375`，确保未来输出 loss 可以回传到长期记忆更新器。正式 GPU smoke
 保持相同模型形状和 horizon；只有快速 CPU fixture 缩小这些数值，且不作为容量证据。
-W&B 中记录 speech mode、有效 codec 帧和 action frame 的监督密度。
-训练只使用 speech mode/codec 与 structured action frame loss；长期记忆没有独立
+W&B 中记录 speech mode、有效 codec 帧 的监督密度。
+训练只使用 speech mode/codec loss 与 JEPA；长期记忆没有独立
 target 或正则项。cosine 学习率最低保持为初始值的 10%。
 
 ## 验收产物

@@ -25,10 +25,6 @@ model:
   speech_depth_layers: 2
   speech_depth_heads: 4
   speech_depth_ffn_dim: 384
-  action_schema_id: structured-action-v1
-  action_coordinate_grid_size: 32
-  action_type_bytes_per_unit: 16
-  action_hotkey_keys_per_unit: 8
   dropout: 0.1
   activation_checkpointing: false
 data:
@@ -45,8 +41,8 @@ data:
   codec_codebook_size: 2048
   unit_ms: 80
   unit_audio_samples: 1920
-  screen_height: 224
-  screen_width: 224
+  video_height: 224
+  video_width: 224
   episode_units: 375
   train_episodes: 1000
   seed: 17
@@ -67,7 +63,6 @@ training:
   codec_scheduled_sampling_start: 0.7
   backbone_train_mode: all
   speech_loss_weight: 1.0
-  action_loss_weight: 1.0
   jepa_loss_weight: 1.0
   memory_horizon_units: 375
   min_learning_rate_ratio: 0.1
@@ -83,13 +78,13 @@ training:
     environment_socket: ~/latentloop-data/runtime/canary/harness-control.sock
     codec_socket: ~/latentloop-data/runtime/sockets/mimi.sock
     reward_socket: ~/latentloop-data/runtime/canary/reward-judge.sock
-    environment_id: isolated-qemu-v1
+    environment_id: avm-dialogue
     environment_version: "1"
-    environment_protocol_version: realtime-v2
-    reward_spec_id: realtime-v2
+    environment_protocol_version: avm-realtime-v1
+    reward_spec_id: avm-dialogue-v1
     judge_model_id: external-frozen-multimodal
     judge_revision: locked-canary
-    rubric_sha256: bea8320ffe6081bcaaab99ca619140f1eab9df47efba5fec42b67115f38ccff0
+    rubric_sha256: b6f942e66d31d5e8767438f55a52c51150cd9a7ae33be7c3f477c0484710e87e
     timeline_root: ~/latentloop-data/runtime/canary/timeline
     session_manifest: ~/latentloop-data/datasets/canary/rl/sessions.jsonl
     sft_replay_shards: ~/latentloop-data/datasets/canary/shards/processed/train/train-*.tar
@@ -100,7 +95,7 @@ training:
     sampling_top_k: 0
 tracking:
   enabled: true
-  project: latentloop
+  project: avm
   mode: online
   base_url: http://127.0.0.1:8080
   media_samples_per_run: 4

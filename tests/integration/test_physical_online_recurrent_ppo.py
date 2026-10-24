@@ -41,7 +41,7 @@ def test_formal_physical_online_recurrent_ppo_runs_one_update(
     )
     session_manifest = tmp_path / "sessions.jsonl"
     session_manifest.write_text(
-        '{"session_id":"life","initial_snapshot_id":"snapshot","seed":17}\n',
+        '{"session_id":"life","scenario_id":"conversation","seed":17}\n',
         encoding="utf-8",
     )
     config.training.rl.session_manifest = str(session_manifest)
@@ -51,7 +51,7 @@ def test_formal_physical_online_recurrent_ppo_runs_one_update(
     config.training.rl.reward_socket = str(tmp_path / "reward.sock")
     config.training.rl.environment_id = "test-physical"
     config.training.rl.environment_version = "1"
-    config.training.rl.environment_protocol_version = "realtime-v2"
+    config.training.rl.environment_protocol_version = "avm-realtime-v1"
     identity = CodecIdentity(
         "synthetic-codec-v1", "synthetic", "synthetic", sample_rate=24000,
         frame_samples=1920, codebooks=2, codebook_size=32
@@ -159,7 +159,7 @@ def test_online_recurrent_ppo_resumes_the_same_lifetime_session(
     )
     session_manifest = tmp_path / "sessions.jsonl"
     session_manifest.write_text(
-        '{"session_id":"life","initial_snapshot_id":"snapshot","seed":17}\n',
+        '{"session_id":"life","scenario_id":"conversation","seed":17}\n',
         encoding="utf-8",
     )
     config.training.rl.session_manifest = str(session_manifest)
@@ -169,7 +169,7 @@ def test_online_recurrent_ppo_resumes_the_same_lifetime_session(
     config.training.rl.reward_socket = str(tmp_path / "reward.sock")
     config.training.rl.environment_id = "test-physical"
     config.training.rl.environment_version = "1"
-    config.training.rl.environment_protocol_version = "realtime-v2"
+    config.training.rl.environment_protocol_version = "avm-realtime-v1"
     identity = CodecIdentity(
         "synthetic-codec-v1",
         "synthetic",

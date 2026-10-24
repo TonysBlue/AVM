@@ -11,10 +11,10 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from contracts import ActuationSignal, SpeechSignal, decode_action_frame
+from contracts import ActuationSignal, SpeechSignal
 from contracts.protocol import message_to_actuation
 
-from data.capture import CaptureLedger, action_frame_from_dict, action_frame_to_dict
+from data.capture import CaptureLedger
 from data.webdataset import EpisodeShardReader
 
 
@@ -40,36 +40,30 @@ def replay_capture(
     transitions: Iterable[dict[str, Any]],
     *,
     session_id: str,
-    snapshot_id: str,
+    scenario_id: str,
     seed: int,
     realtime: bool = True,
     step: bool = False,
     on_started: Callable[[], None] | None = None,
     on_event: Callable[[ReplayEvent], None] | None = None,
 ) -> list[ReplayEvent]:
-    """Apply recorded actions/speech through Harness without loading a model."""
+    """Apply recorded speech through Harness without loading a model."""
 
-    harness.start_lifetime_session(snapshot_id, seed, session_id)
+    harness.start_lifetime_session(scenario_id, seed, session_id)
     if on_started is not None:
         on_started()
     events: list[ReplayEvent] = []
     started = time.monotonic()
-    pending = b""
     for index, transition in enumerate(transitions):
         if int(transition.get("unit_index", index)) != index:
             raise ValueError("replay transition units must be contiguous")
-        frame = action_frame_from_dict(dict(transition["action_frame"]))
         speech_b64 = str(transition.get("speech_pcm_b64", ""))
         try:
             pcm = base64.b64decode(speech_b64, validate=True)
         except (ValueError, TypeError) as error:
             raise ValueError(f"replay unit {index} speech PCM is invalid") from error
         speech = SpeechSignal(pcm, silent=bool(transition.get("speech_silent", False)))
-        decoded = decode_action_frame(
-            frame, event_id=f"{session_id}-replay-{index}", pending_utf8=pending
-        )
-        pending = decoded.pending_utf8
-        output = ActuationSignal(session_id, index, speech, controls=decoded.controls)
+        output = ActuationSignal(session_id, index, speech)
         observation, receipt = harness.apply(output)
         if observation.unit_index != index + 1 or receipt.unit_index != index:
             raise RuntimeError(f"replay unit {index} returned a non-contiguous result")
@@ -94,8 +88,6 @@ def replay_capture(
                 time.sleep(delay / 1000.0)
         if step:
             input(f"replay unit {index} complete; press Enter to continue")
-    if pending:
-        raise ValueError("replay ended with an incomplete UTF-8 TYPE frame")
     return events
 
 
@@ -103,7 +95,7 @@ def replay_manifest(
     path: str | Path,
     *,
     harness: Any,
-    snapshot_id: str,
+    scenario_id: str,
     seed: int,
     session_id: str,
     realtime: bool,
@@ -115,7 +107,7 @@ def replay_manifest(
         harness,
         records,
         session_id=session_id,
-        snapshot_id=snapshot_id,
+        scenario_id=scenario_id,
         seed=seed,
         realtime=realtime,
         step=step,
@@ -129,7 +121,7 @@ def replay_episode(
     data_config: Any,
     model_config: Any,
     harness: Any,
-    snapshot_id: str,
+    scenario_id: str,
     seed: int,
     session_id: str,
     episode_id: str | None = None,
@@ -138,7 +130,7 @@ def replay_episode(
     on_started: Callable[[], None] | None = None,
     on_event: Callable[[ReplayEvent], None] | None = None,
 ) -> list[ReplayEvent]:
-    """Replay target speech and ActionFrames from one current WebDataset episode."""
+    """Replay target speech from one current WebDataset episode."""
 
     selected = None
     for episode in EpisodeShardReader(shards, data_config, model_config):
@@ -156,7 +148,6 @@ def replay_episode(
             "environment_id",
             "environment_version",
             "protocol_version",
-            "action_schema_id",
         )
     }
     if not all(expected_identity.values()) or any(
@@ -175,7 +166,6 @@ def replay_episode(
         prepared.append(
             {
                 "unit_index": index,
-                "action_frame": action_frame_to_dict(unit.action.as_contract()),
                 "speech_pcm_b64": base64.b64encode(
                     pcm.detach().cpu().float().numpy().tobytes()
                 ).decode(),
@@ -187,7 +177,7 @@ def replay_episode(
             harness,
             prepared,
             session_id=session_id,
-            snapshot_id=snapshot_id,
+            scenario_id=scenario_id,
             seed=seed,
             realtime=realtime,
             step=step,
@@ -202,7 +192,7 @@ def replay_ledger(
     root: str | Path,
     *,
     harness: Any,
-    snapshot_id: str,
+    scenario_id: str,
     seed: int,
     session_id: str,
     realtime: bool = True,
@@ -220,7 +210,6 @@ def replay_ledger(
             "environment_id",
             "environment_version",
             "protocol_version",
-            "action_schema_id",
         )
     }
     if not all(expected_identity.values()) or any(
@@ -228,16 +217,14 @@ def replay_ledger(
     ):
         raise ValueError("replay Harness identity does not match the capture ledger")
     ledger_root = ledger.root
-    transitions = [record.action_frame for record in ledger.records]
     prepared: list[dict[str, Any]] = []
-    for index, action_frame in enumerate(transitions):
+    for index, _record in enumerate(ledger.records):
         actuation = message_to_actuation(
             (ledger_root / f"actuation-{index:012d}.pb").read_bytes()
         )
         prepared.append(
             {
                 "unit_index": index,
-                "action_frame": action_frame,
                 "speech_pcm_b64": base64.b64encode(actuation.speech.pcm).decode(),
                 "speech_silent": actuation.speech.silent,
             }
@@ -247,7 +234,7 @@ def replay_ledger(
             harness,
             prepared,
             session_id=session_id,
-            snapshot_id=snapshot_id,
+            scenario_id=scenario_id,
             seed=seed,
             realtime=realtime,
             step=step,

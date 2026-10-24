@@ -1,14 +1,21 @@
-# LatentLoop
+# AVM — Audio-Video Model without Text
 
-实时流多模态 LatentLoop 的研究实现。当前基础设施已经包含有界逐层 RecentKV、Backbone
-内固定容量语义 slots `C_t`、每层固定容量 SlowMemory、单路混合麦克风、屏幕输入、直接
-codec token Speech Head、独立 Action Head、递归重计算、精确断点恢复、WebDataset、
-CPU-only Ray 任务和 W&B Local。
+AVM 是面向通用全双工实时 Omni 对话交互的音视频模型研究与训练项目。模型架构基于
+LatentLoop，移除电脑动作能力，保留连续音视频感知、循环状态、长期记忆与直接语音生成。
+模型持续接收混合音频、视频和时间，边听、边看、边说，自主决定回应、静默或停止发声。
+运行时不以文本为输入输出通道，也不经过 ASR→文本模型→TTS 链路。
+
+当前 Omni 的范围是音视频输入、语音输出，不包含电脑操控、工具调用或视频生成。
+视频可来自摄像头、一般视频流或屏幕共享；GUI 不构成模型、数据或训练环境的前提。
+底层保留有界 RecentKV、语义 slots `C_t`、SlowMemory、直接 codec Speech Head、
+递归重计算、精确恢复、WebDataset 和 W&B Local。
 
 完整架构见 `docs/realtime-multimodal-latent-loop.md`，本地训练设计见
 `docs/local-training-platform.md`。直接流式语音的实现与运行命令见
-`docs/direct-speech.md`；统一电脑操控的 Action Head 协议见
-`docs/unified-action.md`。
+`docs/direct-speech.md`。原 LatentLoop 动作协议已退出 AVM。
+
+实时摄像头/视频对话、播放回流、真实视频来源锁与旧模型权重迁移的命令见
+[`AVM 实时运行手册`](docs/avm-runtime.md)。正式数据与设备缺失时显式失败，不回退测试实现。
 
 ## 环境初始化
 
@@ -27,7 +34,7 @@ uv run data inspect-model --config configs/canary-gpu-smoke.yaml
 uv run data inspect-model --config configs/canary.yaml
 ```
 
-Canary 与 GPU capacity smoke 使用完全相同的 11,298,250 参数模型和 375-unit horizon。
+Canary 与 GPU capacity smoke 使用完全相同的 10,170,811 参数模型和 375-unit horizon。
 后者使用 synthetic 数据，在 RTX 2080 SUPER 8GB 上执行一次完整 FP16 forward、backward、
 AdamW update 与 checkpoint：
 
@@ -102,7 +109,7 @@ scripts/wandb-local.sh down
 直接流式语音使用 80 ms 主时钟与 Mimi 24 kHz codec。实现和运行命令见
 [`docs/direct-speech.md`](docs/direct-speech.md)。
 
-Canary 数据准备、外部语料许可证锁、CosyVoice/ASR/屏幕适配器以及自动审计门禁见
+Canary 数据准备、外部语料许可证锁、离线 CosyVoice/ASR、真实视频适配器及审计门禁见
 [`docs/canary-data.md`](docs/canary-data.md)。本地 fixture 可以在不下载语料和模型的
 情况下跑通准备链：
 

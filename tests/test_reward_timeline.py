@@ -8,7 +8,7 @@ from contracts import (
     RewardEvent,
     RewardStatus,
     RewardVector,
-    ScreenSignal,
+    VideoSignal,
 )
 from data import ObservationTimeline
 
@@ -17,7 +17,7 @@ def _observation(unit: int) -> ObservationSignal:
     return ObservationSignal(
         "session", unit, unit * 80, 80,
         MicSignal(b"x" * 7680),
-        ScreenSignal(b"x" * (224 * 224 * 3), 224, 224),
+        VideoSignal(b"x" * (224 * 224 * 3), 224, 224, captured_at_ms=0, revision=0),
     )
 
 
@@ -32,7 +32,7 @@ def test_observation_timeline_is_canonical_hash_chain() -> None:
 
 
 def test_reward_event_only_finalized_outcomes_are_trainable() -> None:
-    reward = RewardVector(1, 0.5, 0.5, 0.5, 0)
+    reward = RewardVector(1, 0.5, 0.5, 0)
     event = RewardEvent(
         "event", "life", "session", "goal", 0, 3, 1, 3,
         RewardStatus.FINALIZED, GoalOutcome.SUCCESS, reward, "spec", "judge", "rev",

@@ -168,9 +168,9 @@ def _cached_episode(path: Path, recipe_hash: str) -> dict[str, Any] | None:
         asset = Path(record[field])
         if not asset.is_file() or sha256_file(asset) != record.get(f"{field}_sha256"):
             return None
-    if record.get("screens"):
-        screen = Path(record["screens"])
-        if not screen.is_file() or sha256_file(screen) != record.get("screens_sha256"):
+    if record.get("videos"):
+        video = Path(record["videos"])
+        if not video.is_file() or sha256_file(video) != record.get("videos_sha256"):
             return None
     return record
 
@@ -304,15 +304,15 @@ def _calibrate_split_durations(root: Path, dataset: str, records: list[dict[str,
                 )
 
 
-def _screens(
+def _videos(
     root: Path,
     dataset: str,
     episode_id: str,
     ticks: int,
     fixture: bool,
-    screen_command: str | None,
+    video_command: str | None,
 ) -> str:
-    output = dataset_path(root, dataset, "normalized", "screens", f"{episode_id}.npz")
+    output = dataset_path(root, dataset, "normalized", "videos", f"{episode_id}.npz")
     receipt_path = output.with_suffix(".json")
     output.parent.mkdir(parents=True, exist_ok=True)
     recipe = {
@@ -322,7 +322,7 @@ def _screens(
         "height": 224,
         "width": 224,
         "fixture": fixture,
-        "adapter": screen_command,
+        "adapter": video_command,
     }
     recipe_hash = stable_hash(recipe)
     if output.exists() and receipt_path.exists():
@@ -334,17 +334,17 @@ def _screens(
     if fixture:
         frame = np.zeros((1, 3, 224, 224), dtype=np.float32)
         frame[:, 0, 48:176, 48:176] = 0.25
-        np.savez_compressed(output, ticks=np.asarray([min(1, ticks - 1)]), frames=frame)
+        np.savez_compressed(output, ticks=np.asarray([0]), frames=frame)
     else:
-        if not screen_command:
-            raise ValueError("screen-conditioned episodes require --screen-command")
-        request = {"operation": "capture-isolated-sandbox", **recipe, "output": str(output)}
+        if not video_command:
+            raise ValueError("video-conditioned episodes require --video-command")
+        request = {"operation": "prepare-dialogue-video", **recipe, "output": str(output)}
         with tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8") as handle:
             json.dump(request, handle)
             handle.flush()
             result = subprocess.run(
                 [
-                    *shlex.split(screen_command),
+                    *shlex.split(video_command),
                     "--request",
                     handle.name,
                     "--output",
@@ -355,7 +355,7 @@ def _screens(
                 check=False,
             )
         if result.returncode or not output.is_file():
-            raise RuntimeError(f"screen adapter failed: {(result.stderr or result.stdout)[-1000:]}")
+            raise RuntimeError(f"video adapter failed: {(result.stderr or result.stdout)[-1000:]}")
     write_json(
         receipt_path,
         {"recipe_sha256": recipe_hash, "artifact_sha256": sha256_file(output)},
@@ -370,7 +370,7 @@ def _compose_plan(
     receipts: dict[tuple[str, str], dict[str, Any]],
     registry: dict[str, Any],
     fixture: bool,
-    screen_command: str | None,
+    video_command: str | None,
 ) -> dict[str, Any]:
     episode_id = f"{dataset}-plan-{plan['plan_id']}"
     turn_receipts = []
@@ -390,7 +390,7 @@ def _compose_plan(
                 for receipt in turn_receipts
             ],
             "voice_registry": registry["registry_sha256"],
-            "screen_adapter": screen_command if plan["category"] == "screen_task" else None,
+            "video_adapter": video_command if plan["category"] == "video_task" else None,
             "fixture": fixture,
         }
     )
@@ -455,8 +455,8 @@ def _compose_plan(
         "mic_audio_sha256": sha256_file(mic_path),
         "target_speech": str(target_path.resolve()),
         "target_speech_sha256": sha256_file(target_path),
-        "source": "generated-computer-dialogue",
-        "source_version": "canary-plan-v1",
+        "source": "generated-omni-dialogue",
+        "source_version": "avm-dialogue-plan-v1",
         "source_url": "internal://datasets/text-plans",
         "source_utterance_ids": [plan["plan_id"]],
         "source_license": source_license,
@@ -469,7 +469,7 @@ def _compose_plan(
         "user_voice_id": user_voice_id,
         "assistant_voice_id": registry["assistant_voice_id"],
         "session_id_hash": stable_hash({"scenario": plan["scenario_id"]}),
-        "device_id_hash": "isolated-sandbox" if plan["category"] == "screen_task" else "synthetic",
+        "device_id_hash": "dialogue-video-source",
         "scenario": plan["scenario_id"],
         "category": plan["category"],
         "turns": turns,
@@ -477,12 +477,6 @@ def _compose_plan(
         "recipe_sha256": recipe_hash,
         "fixture": fixture,
     }
-    if plan["category"] == "screen_task":
-        screen_path = _screens(
-            root, dataset, episode_id, timeline // FRAME_SAMPLES, fixture, screen_command
-        )
-        record["screens"] = str((root / screen_path).resolve())
-        record["screens_sha256"] = sha256_file(root / screen_path)
     write_json(record_path, record)
     return record
 
@@ -696,7 +690,7 @@ def _select_sources(
 _TRAINING_CATEGORY_ORDER = (
     "synthetic_dialogue",
     "adjacent_turns",
-    "screen_task",
+    "video_task",
     "public_speech",
 )
 
@@ -744,7 +738,7 @@ def build_canary_manifest(
     *,
     fixture: bool = False,
     normalize_command: str | None = None,
-    screen_command: str | None = None,
+    video_command: str | None = None,
 ) -> dict[str, Any]:
     dataset = "canary"
     root = Path(root).expanduser().resolve()
@@ -770,12 +764,26 @@ def build_canary_manifest(
     )
     for plan in plans["plans"]:
         records.append(
-            _compose_plan(root, dataset, plan, receipts, registry, fixture, screen_command)
+            _compose_plan(root, dataset, plan, receipts, registry, fixture, video_command)
         )
     ids = [record["episode_id"] for record in records]
     if len(ids) != len(set(ids)):
         raise ValueError("episode IDs are duplicated")
     _calibrate_split_durations(root, dataset, records)
+    for record in records:
+        ticks = round(_duration_seconds(root, record) * SAMPLE_RATE / FRAME_SAMPLES)
+        video_path = _videos(root, dataset, record["episode_id"], ticks, fixture, video_command)
+        record["videos"] = str((root / video_path).resolve())
+        record["videos_sha256"] = sha256_file(root / video_path)
+        record["schema_id"] = "avm-episode-v1"
+        if not fixture:
+            provenance = read_json((root / video_path).with_suffix(".source.json"))
+            if not all(provenance.get(key) for key in (
+                "source_sha256", "source_license", "source_version", "source_manifest_sha256"
+            )):
+                raise ValueError("dialogue video requires locked source provenance")
+            record["video_source_identity"] = provenance
+
     _verify_isolation(records)
     destination = dataset_path(root, dataset, "manifests")
     # Keep the global and split manifests in the same deterministic training

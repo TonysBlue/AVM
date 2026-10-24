@@ -177,7 +177,6 @@ class SingleActiveGoalTracker:
                         "task": event.reward.task,
                         "speech_quality": event.reward.speech_quality,
                         "latency_quality": event.reward.latency_quality,
-                        "action_efficiency": event.reward.action_efficiency,
                         "safety_quality": event.reward.safety_quality,
                     },
                     "spec_id": event.spec_id,

@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package latentloop.realtime.v2;
+package avm.realtime.v1;
 
 message MicPcm {
   uint32 sample_rate_hz = 1;
@@ -9,38 +9,24 @@ message MicPcm {
   bytes samples = 4;
 }
 
-message ScreenFrame {
+message VideoFrame {
   uint32 width = 1;
   uint32 height = 2;
-  reserved 3, 4;
+  uint64 captured_at_ms = 3;
+  uint64 revision = 4;
   string pixel_format = 5;
   string encoding = 6;
   bytes image = 7;
 }
 
 message ObservationSignal {
+  string protocol_version = 100;
   string session_id = 1;
   uint64 unit_index = 2;
   uint64 timestamp_ms = 3;
   uint32 delta_ms = 4;
   MicPcm mic = 5;
-  ScreenFrame screen = 6;
-}
-
-message ControlSignal {
-  string kind = 1;
-  string event_id = 2;
-  reserved 3;
-  optional float x = 4;
-  optional float y = 5;
-  reserved 6, 7;
-  optional float dx = 8;
-  optional float dy = 9;
-  reserved 10;
-  string text = 11;
-  optional uint32 key = 12;
-  optional uint32 button = 13;
-  string button_phase = 14;
+  VideoFrame video = 6;
 }
 
 message SpeechSignal {
@@ -52,10 +38,11 @@ message SpeechSignal {
 }
 
 message ActuationSignal {
+  string protocol_version = 100;
   string session_id = 1;
   uint64 unit_index = 2;
   SpeechSignal speech = 3;
-  repeated ControlSignal controls = 4;
+  reserved 4;
 }
 
 message EnvironmentReceipt {

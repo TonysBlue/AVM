@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 from data import SyntheticEpisodeDataset
-from model import ActionFrame, SpeechSamplingConfig, StreamingLatentLoop, action_frame_log_prob
+from model import SpeechSamplingConfig, StreamingLatentLoop
 from training.ppo import (
     clipped_policy_loss,
     generalized_advantage_estimate,
@@ -47,20 +47,16 @@ def test_ppo_advantage_is_stop_gradient() -> None:
     assert advantage.grad is None
 
 
-def test_recurrent_ppo_updates_both_policy_branches_and_value() -> None:
+def test_recurrent_ppo_updates_speech_policy_and_value() -> None:
     speech = torch.tensor([0.1, 0.2], requires_grad=True)
-    action = torch.tensor([-0.1, 0.1], requires_grad=True)
     value = torch.tensor([0.3, 0.4], requires_grad=True)
     total, components = recurrent_ppo_loss(
         speech,
-        torch.zeros(2),
-        action,
         torch.zeros(2),
         torch.tensor([1.0, -1.0]),
         value,
         torch.zeros(2),
         torch.tensor([1.0, 0.0]),
-        torch.zeros(2),
         torch.zeros(2),
         clip_epsilon=0.2,
         value_coef=0.5,
@@ -68,20 +64,12 @@ def test_recurrent_ppo_updates_both_policy_branches_and_value() -> None:
         reference_kl_beta=0.02,
     )
     total.backward()
-    assert speech.grad is not None and action.grad is not None and value.grad is not None
+    assert speech.grad is not None and value.grad is not None
     assert set(components) == {
-        "actor", "speech_actor", "action_actor", "value", "reference_kl", "entropy"
+        "actor", "speech_actor", "value", "reference_kl", "entropy"
     }
 
 
-def test_sampled_structured_action_logprob_is_finite(smoke_config) -> None:
-    model = StreamingLatentLoop(smoke_config.model)
-    unit = SyntheticEpisodeDataset(smoke_config.data, smoke_config.model).make_episode(0).units[0]
-    generated = model.generate_step(unit, model.initial_state(1, "cpu"))
-
-    logprob = action_frame_log_prob(generated.output.action, generated.action_frame)
-
-    assert torch.isfinite(logprob).all()
 
 
 def test_speech_policy_logprob_is_the_joint_mode_and_codec_probability(
@@ -91,18 +79,15 @@ def test_speech_policy_logprob_is_the_joint_mode_and_codec_probability(
     unit = SyntheticEpisodeDataset(smoke_config.data, smoke_config.model).make_episode(0).units[0]
     mode = torch.ones(1, dtype=torch.long)
     codes = unit.speech_codes
-    action = ActionFrame.no_action(1)
     sampling = SpeechSamplingConfig(temperature=0.8, top_k=0)
     output = model.forward_step(
         unit,
         model.initial_state(1, "cpu"),
         speech_teacher_codes=codes,
         speech_teacher_mode=mode,
-        action_teacher_frame=action,
-        action_teacher_mask=torch.ones(1, dtype=torch.bool),
     )
 
-    speech, _ = _policy_logprobs(output, mode, codes, action, sampling)
+    speech = _policy_logprobs(output, mode, codes, sampling)
     mode_logprob = torch.log_softmax(
         output.speech_mode_logits / sampling.temperature, dim=-1
     ).gather(-1, mode[:, None]).squeeze(-1)

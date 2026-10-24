@@ -76,7 +76,6 @@ def test_train_and_evaluation_summaries_explain_smoke_quality(tmp_path: Path) ->
                 "episodes": 3,
                 "speech_mode_accuracy": 0.8,
                 "speech_codec_accuracy": [0.0, 0.1],
-                "action_kind_accuracy": 0.25,
             },
         )
 

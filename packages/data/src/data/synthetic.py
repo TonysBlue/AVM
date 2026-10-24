@@ -3,8 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import torch
-from contracts import ACTION_SCHEMA_ID, ActionKind
-from model.types import ActionFrame, Episode, SpeechMode, StreamUnit
+from model.types import Episode, SpeechMode, StreamUnit
 from runtime.codec import codec_frame_mask
 from runtime.config import DataConfig, ModelConfig
 
@@ -35,7 +34,7 @@ class SyntheticEpisodeDataset:
                 "source_license": "project-generated",
                 "redistribution_allowed": True,
                 "split": "train",
-                "scenario": "state-memory-click",
+                "scenario": "audiovisual-dialogue-memory",
                 "device_id_hash": "synthetic-device",
                 "session_id_hash": f"synthetic-session-{episode_index:08d}",
                 "seed": self.data.seed + episode_index,
@@ -46,15 +45,14 @@ class SyntheticEpisodeDataset:
                 "codec_weight_hash": self.data.codec_weight_hash,
                 "codec_revision": self.data.codec_revision,
                 "stage": "pretrain",
+                "schema_id": "avm-episode-v1",
                 "dataset_scale": self.data.dataset,
                 "sample_kind": "supervised_episode",
-                "supervision_kind": "speech_action",
-                "action_source": "synthetic_expert",
+                "supervision_kind": "speech",
                 "task_id": f"synthetic-task-{scenario}",
                 "environment_id": "synthetic-test-only",
                 "environment_version": "1",
-                "protocol_version": "realtime-v2",
-                "action_schema_id": ACTION_SCHEMA_ID,
+                "protocol_version": "avm-realtime-v1",
             },
             target_speech=torch.zeros(self.data.episode_units * self.data.unit_audio_samples),
             sample_index_in_shard=episode_index,
@@ -81,11 +79,11 @@ class SyntheticEpisodeDataset:
             * 0.03
         )
         audio += scenario / 63 * 0.1
-        screen = torch.zeros(3, self.data.screen_height, self.data.screen_width)
-        row = scenario % self.data.screen_height
-        column = (scenario * 3 + unit_index) % self.data.screen_width
-        screen[:, row, :] = 0.5
-        screen[:, :, column] = 1.0
+        video = torch.zeros(3, self.data.video_height, self.data.video_width)
+        row = scenario % self.data.video_height
+        column = (scenario * 3 + unit_index) % self.data.video_width
+        video[:, row, :] = 0.5
+        video[:, :, column] = 1.0
         codes = torch.empty(
             self.model.speech_frames_per_unit,
             self.model.speech_codebooks,
@@ -98,20 +96,11 @@ class SyntheticEpisodeDataset:
                 + torch.arange(self.model.speech_frames_per_unit)
                 + codebook
             ) % self.model.speech_codebook_size
-        action = ActionFrame.no_action(1)
-        if unit_index % 4 == 2:
-            x = column / max(self.data.screen_width - 1, 1)
-            y = row / max(self.data.screen_height - 1, 1)
-            cell_x = min(int(x * 32), 31)
-            cell_y = min(int(y * 32), 31)
-            action.kind[0] = int(ActionKind.POINTER_MOVE)
-            action.coordinate_cell[0] = cell_y * 32 + cell_x
-            action.coordinate_residual[0] = torch.tensor((x * 32 - cell_x, y * 32 - cell_y))
         return StreamUnit(
             timestamp_ms=torch.tensor([unit_index * self.data.unit_ms]),
             delta_ms=torch.tensor([self.data.unit_ms]),
             mic_audio=audio[None],
-            screen=screen[None],
+            video=video[None],
             speech_mode=torch.tensor([int(SpeechMode.SPEECH)]),
             speech_mode_mask=torch.ones(1, dtype=torch.bool),
             speech_codes=codes[None],
@@ -121,6 +110,4 @@ class SyntheticEpisodeDataset:
                 self.data.codec_frame_rate,
                 self.model.speech_frames_per_unit,
             )[None],
-            action=action,
-            action_supervision_mask=torch.ones(1, dtype=torch.bool),
         )

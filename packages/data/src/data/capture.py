@@ -1,8 +1,8 @@
 """Harness-backed expert capture and append-only session ledgers.
 
 The collector deliberately keeps the physical boundary in Harness.  It accepts
-an expert ``ActionFrame`` and one 80 ms speech PCM frame, converts the frame to
-validated controls, and records the observation/actuation/receipt transition.
+one expert 80 ms speech PCM frame and records the audiovisual
+observation/speech/receipt transition.
 No model or privileged environment state is involved.
 """
 
@@ -19,20 +19,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from contracts import (
-    ACTION_SCHEMA_ID,
-    ActionKind,
-    ActuationSignal,
-    EnvironmentReceipt,
-    ObservationSignal,
-    PointerButton,
-    PointerButtonPhase,
-    SpeechSignal,
-    decode_action_frame,
-)
-from contracts import (
-    ActionFrame as ContractActionFrame,
-)
+from contracts import ActuationSignal, EnvironmentReceipt, ObservationSignal, SpeechSignal
 from contracts.protocol import (
     actuation_to_payload,
     message_to_actuation,
@@ -41,76 +28,8 @@ from contracts.protocol import (
     payload_to_receipt,
     receipt_to_payload,
 )
-from model.types import ActionFrame, Episode, SpeechMode, StreamUnit
-
-
-def action_frame_from_dict(value: dict[str, Any]) -> ContractActionFrame:
-    """Parse the control-console JSON representation of one action frame."""
-
-    if not isinstance(value, dict):
-        raise ValueError("action frame must be an object")
-    raw_kind = value.get("kind", "NO_ACTION")
-    try:
-        kind = (
-            ActionKind[str(raw_kind).upper()]
-            if isinstance(raw_kind, str)
-            else ActionKind(int(raw_kind))
-        )
-    except (KeyError, TypeError, ValueError) as error:
-        raise ValueError(f"invalid action kind: {raw_kind!r}") from error
-    coordinate = value.get("coordinate_residual", value.get("coordinate", (0.0, 0.0)))
-    if isinstance(coordinate, list):
-        coordinate = tuple(float(item) for item in coordinate)
-    residual = (
-        tuple(coordinate)
-        if isinstance(coordinate, tuple) and len(coordinate) == 2
-        else (0.0, 0.0)
-    )
-    scroll = value.get("scroll_delta", (0.0, 0.0))
-    if isinstance(scroll, list):
-        scroll = tuple(float(item) for item in scroll)
-    scroll_delta = tuple(scroll) if isinstance(scroll, tuple) and len(scroll) == 2 else (0.0, 0.0)
-    button = value.get("button", 0)
-    phase = value.get("button_phase", "CLICK")
-    button = (
-        PointerButton[str(button).upper()]
-        if isinstance(button, str)
-        else PointerButton(int(button))
-    )
-    phase = (
-        PointerButtonPhase[str(phase).upper()]
-        if isinstance(phase, str)
-        else PointerButtonPhase(int(phase))
-    )
-    text = value.get("text_bytes", value.get("text", b""))
-    if isinstance(text, str):
-        text = text.encode("utf-8")
-    elif isinstance(text, list):
-        text = bytes(int(item) for item in text)
-    keys = value.get("hotkey_keys", value.get("keys", ()))
-    return ContractActionFrame(
-        kind=kind,
-        coordinate_cell=int(value.get("coordinate_cell", 0)),
-        coordinate_residual=residual,
-        button=button,
-        button_phase=phase,
-        scroll_delta=scroll_delta,
-        text_bytes=bytes(text),
-        hotkey_keys=tuple(int(item) for item in keys),
-    )
-
-
-def action_frame_to_dict(frame: ContractActionFrame) -> dict[str, Any]:
-    return {
-        "kind": frame.kind.name,
-        "coordinate_cell": frame.coordinate_cell,
-        "coordinate_residual": list(frame.coordinate_residual),
-        "button": frame.button.name,
-        "button_phase": frame.button_phase.name,
-        "scroll_delta": list(frame.scroll_delta),
-        "text_bytes": list(frame.text_bytes),
-        "hotkey_keys": list(frame.hotkey_keys),
-    }
+from model.types import Episode, SpeechMode, StreamUnit
+from runtime.video import video_tensor
 
 
 def speech_signal_from_base64(value: str, *, silent: bool = False) -> SpeechSignal:
@@ -135,7 +54,6 @@ class CaptureTransition:
     receipt_sha256: str
     previous_chain_sha256: str
     chain_sha256: str
-    action_frame: dict[str, Any]
     speech_silent: bool
     receipt_accepted: bool
 
@@ -227,7 +145,6 @@ class CaptureLedger:
                 "session_id": self.session_id,
                 "unit_index": expected,
                 **hashes,
-                "action_frame": item["action_frame"],
                 "speech_silent": bool(item["speech_silent"]),
                 "receipt_accepted": bool(item["receipt_accepted"]),
             }
@@ -260,7 +177,6 @@ class CaptureLedger:
                 receipt_sha256=hashes["receipt_sha256"],
                 previous_chain_sha256=self._chain,
                 chain_sha256=chain,
-                action_frame=dict(item["action_frame"]),
                 speech_silent=bool(item["speech_silent"]),
                 receipt_accepted=receipt.accepted,
             )
@@ -304,7 +220,6 @@ class CaptureLedger:
         actuation: ActuationSignal,
         next_observation: ObservationSignal,
         receipt: EnvironmentReceipt,
-        action_frame: ContractActionFrame,
     ) -> CaptureTransition:
         if self._current is None:
             raise RuntimeError("capture session has not started")
@@ -335,7 +250,6 @@ class CaptureLedger:
             "next_observation_sha256": _payload_sha256(next_observation_payload),
             "actuation_sha256": _payload_sha256(actuation_payload),
             "receipt_sha256": _payload_sha256(receipt_payload),
-            "action_frame": action_frame_to_dict(action_frame),
             "speech_silent": actuation.speech.silent,
             "receipt_accepted": receipt.accepted,
         }
@@ -350,7 +264,6 @@ class CaptureLedger:
             identity["receipt_sha256"],
             self._chain,
             chain,
-            identity["action_frame"],
             actuation.speech.silent,
             receipt.accepted,
         )
@@ -413,52 +326,42 @@ class CaptureLedger:
 
 
 class ExpertCaptureSession:
-    """Drive one Harness session from expert-provided frames and speech."""
+    """Drive one Harness session from expert-provided speech."""
 
-    def __init__(self, harness: Any, ledger: CaptureLedger, *, seed: int, snapshot_id: str) -> None:
+    def __init__(self, harness: Any, ledger: CaptureLedger, *, seed: int, scenario_id: str) -> None:
         self.harness = harness
         self.ledger = ledger
         self.seed = seed
-        self.snapshot_id = snapshot_id
-        self._pending_utf8 = b""
+        self.scenario_id = scenario_id
         self._started = False
 
     def start(self) -> ObservationSignal:
         observation = self.harness.start_lifetime_session(
-            self.snapshot_id, self.seed, self.ledger.session_id
+            self.scenario_id, self.seed, self.ledger.session_id
         )
         self.ledger.start(observation)
         self._started = True
         return observation
 
     def step(
-        self, frame: ContractActionFrame, speech: SpeechSignal
+        self, speech: SpeechSignal
     ) -> tuple[ObservationSignal, EnvironmentReceipt]:
         if not self._started:
             raise RuntimeError("capture session has not started")
         unit_index = len(self.ledger.records)
-        decoded = decode_action_frame(
-            frame,
-            event_id=f"{self.ledger.session_id}-unit-{unit_index}",
-            pending_utf8=self._pending_utf8,
-        )
-        self._pending_utf8 = decoded.pending_utf8
         output = ActuationSignal(
             self.ledger.session_id,
             unit_index,
             speech,
-            controls=decoded.controls,
         )
         observation, receipt = self.harness.apply(output)
-        self.ledger.append(output, observation, receipt, frame)
+        self.ledger.append(output, observation, receipt)
         if not receipt.accepted:
             failure = receipt.safety_violation or receipt.infrastructure_failure or "rejected"
             raise RuntimeError(f"Harness rejected capture unit {unit_index}: {failure}")
         return observation, receipt
 
     def finish(self, metadata: dict[str, Any] | None = None) -> Episode:
-        if self._pending_utf8:
-            raise ValueError("capture ended with an incomplete UTF-8 TYPE frame")
         episode = episode_from_capture(self.ledger, metadata=metadata)
         episode.validate(
             audio_samples=1_920,
@@ -498,57 +401,32 @@ def episode_from_capture(
 ) -> Episode:
     initial = ledger.initial_observation
     observations = [initial]
-    actions: list[ContractActionFrame] = []
     speech: list[torch.Tensor] = []
     speech_active: list[bool] = []
-    for index, record in enumerate(ledger.records):
+    for index, _record in enumerate(ledger.records):
         observation_path = ledger.root / f"observation-{index + 1:012d}.pb"
         next_observation = message_to_observation(observation_path.read_bytes())
         actuation = message_to_actuation((ledger.root / f"actuation-{index:012d}.pb").read_bytes())
         observations.append(next_observation)
-        actions.append(action_frame_from_dict(record.action_frame))
         speech.append(_speech_waveform(actuation.speech))
         speech_active.append(not actuation.speech.silent)
     units: list[StreamUnit] = []
-    for _index, (observation, frame, _target, speaking) in enumerate(
-        zip(observations[:-1], actions, speech, speech_active, strict=True)
+    for _index, (observation, _target, speaking) in enumerate(
+        zip(observations[:-1], speech, speech_active, strict=True)
     ):
-        image = np.frombuffer(observation.screen.image, dtype=np.uint8)
-        channels = 4 if observation.screen.pixel_format == "rgba32" else 3
-        screen = torch.from_numpy(
-            image.copy()
-            .reshape(observation.screen.height, observation.screen.width, channels)[..., :3]
-        )
-        screen = screen.permute(2, 0, 1).float()[None]
-        screen = screen.div(255)
-        model_action = ActionFrame(
-            kind=torch.tensor([int(frame.kind)]),
-            coordinate_cell=torch.tensor([frame.coordinate_cell]),
-            coordinate_residual=torch.tensor([frame.coordinate_residual], dtype=torch.float32),
-            button=torch.tensor([int(frame.button)]),
-            button_phase=torch.tensor([int(frame.button_phase)]),
-            scroll_delta=torch.tensor([frame.scroll_delta], dtype=torch.float32),
-            text_bytes=torch.tensor([list(frame.text_bytes) + [0] * (16 - len(frame.text_bytes))]),
-            text_length=torch.tensor([len(frame.text_bytes)]),
-            hotkey_keys=torch.tensor(
-                [list(frame.hotkey_keys) + [0] * (8 - len(frame.hotkey_keys))]
-            ),
-            hotkey_length=torch.tensor([len(frame.hotkey_keys)]),
-        )
+        video = video_tensor(observation.video)
         units.append(
             StreamUnit(
                 timestamp_ms=torch.tensor([observation.timestamp_ms]),
                 delta_ms=torch.tensor([observation.delta_ms]),
                 mic_audio=_mic_waveform(observation),
-                screen=screen,
+                video=video,
                 speech_mode=torch.tensor(
                     [int(SpeechMode.SPEECH if speaking else SpeechMode.SILENCE)]
                 ),
                 speech_mode_mask=torch.tensor([True]),
                 speech_codes=torch.zeros(1, 1, 8, dtype=torch.long),
                 speech_codec_mask=torch.tensor([[speaking]]),
-                action=model_action,
-                action_supervision_mask=torch.tensor([True]),
             )
         )
     target_speech = torch.cat(speech) if speech else torch.empty(0)
@@ -561,29 +439,24 @@ def episode_from_capture(
     environment_id = str(supplied.get("environment_id", ""))
     environment_version = str(supplied.get("environment_version", ""))
     protocol_version = str(supplied.get("protocol_version", ""))
-    action_schema_id = str(supplied.get("action_schema_id", ""))
-    if not all(
-        (environment_id, environment_version, protocol_version, action_schema_id)
-    ):
+    if not all((environment_id, environment_version, protocol_version)):
         raise ValueError("capture export requires complete Harness identity metadata")
-    if action_schema_id != ACTION_SCHEMA_ID:
-        raise ValueError("capture export action schema identity is incompatible")
+    if protocol_version != "avm-realtime-v1":
+        raise ValueError("capture export protocol identity is incompatible")
     base = {
         "stage": "sft",
+        "schema_id": "avm-episode-v1",
         "dataset_scale": "canary",
         "sample_kind": "expert_capture",
-        "supervision_kind": "speech_action",
-        "action_source": "expert",
+        "supervision_kind": "speech",
         "task_id": ledger.session_id,
         "environment_id": environment_id,
         "environment_version": environment_version,
         "protocol_version": protocol_version,
-        "action_schema_id": action_schema_id,
         "runtime_identity": {
             "protocol_version": protocol_version,
             "environment_id": environment_id,
             "environment_version": environment_version,
-            "action_schema_id": action_schema_id,
         },
         "sample_rate": 24_000,
         "unit_ms": 80,
@@ -603,8 +476,6 @@ __all__ = [
     "CaptureLedger",
     "CaptureTransition",
     "ExpertCaptureSession",
-    "action_frame_from_dict",
-    "action_frame_to_dict",
     "episode_from_capture",
     "speech_signal_from_base64",
 ]

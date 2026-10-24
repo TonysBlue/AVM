@@ -9,21 +9,11 @@ from __future__ import annotations
 
 import socket
 from collections.abc import Callable
-from typing import Any
 
-from contracts.control import (
-    ActuationSignal,
-    ButtonPhase,
-    ControlKind,
-    ControlSignal,
-    SpeechSignal,
-)
-from contracts.observation import MicSignal, ObservationSignal, ScreenSignal
+from contracts.control import ActuationSignal, SpeechSignal
+from contracts.observation import MicSignal, ObservationSignal, VideoSignal
 from contracts.realtime_pb2 import (
     ActuationSignal as ActuationMessage,
-)
-from contracts.realtime_pb2 import (
-    ControlSignal as ControlMessage,
 )
 from contracts.realtime_pb2 import (
     EnvironmentReceipt as ReceiptMessage,
@@ -34,13 +24,9 @@ from contracts.realtime_pb2 import (
 from contracts.receipt import EnvironmentReceipt
 
 
-def _set_optional(message: Any, field: str, value: Any) -> None:
-    if value is not None:
-        setattr(message, field, value)
-
-
 def observation_to_payload(value: ObservationSignal) -> bytes:
     message = ObservationMessage(
+        protocol_version="avm-realtime-v1",
         session_id=value.session_id,
         unit_index=value.unit_index,
         timestamp_ms=value.timestamp_ms,
@@ -50,11 +36,13 @@ def observation_to_payload(value: ObservationSignal) -> bytes:
     message.mic.channels = value.mic.channels
     message.mic.encoding = value.mic.encoding
     message.mic.samples = value.mic.samples
-    message.screen.width = value.screen.width
-    message.screen.height = value.screen.height
-    message.screen.pixel_format = value.screen.pixel_format
-    message.screen.encoding = value.screen.encoding
-    message.screen.image = value.screen.image
+    message.video.width = value.video.width
+    message.video.height = value.video.height
+    message.video.pixel_format = value.video.pixel_format
+    message.video.encoding = value.video.encoding
+    message.video.image = value.video.image
+    message.video.captured_at_ms = value.video.captured_at_ms
+    message.video.revision = value.video.revision
     return message.SerializeToString()
 
 
@@ -65,8 +53,10 @@ def observation_to_message(value: ObservationSignal) -> bytes:
 
 def message_to_observation(payload: bytes) -> ObservationSignal:
     message = ObservationMessage.FromString(payload)
-    if not message.HasField("mic") or not message.HasField("screen"):
-        raise ValueError("ObservationSignal requires mic and screen messages")
+    if message.protocol_version != "avm-realtime-v1":
+        raise ValueError("incompatible AVM observation protocol")
+    if not message.HasField("mic") or not message.HasField("video"):
+        raise ValueError("ObservationSignal requires mic and video messages")
     return ObservationSignal(
         session_id=message.session_id,
         unit_index=message.unit_index,
@@ -78,50 +68,28 @@ def message_to_observation(payload: bytes) -> ObservationSignal:
             channels=message.mic.channels,
             encoding=message.mic.encoding,
         ),
-        screen=ScreenSignal(
-            message.screen.image,
-            width=message.screen.width,
-            height=message.screen.height,
-            pixel_format=message.screen.pixel_format,
-            encoding=message.screen.encoding,
+        video=VideoSignal(
+            message.video.image,
+            captured_at_ms=message.video.captured_at_ms,
+            revision=message.video.revision,
+            width=message.video.width,
+            height=message.video.height,
+            pixel_format=message.video.pixel_format,
+            encoding=message.video.encoding,
         ),
     )
 
 
-def _control_to_message(value: ControlSignal) -> ControlMessage:
-    message = ControlMessage(
-        kind=value.kind.value,
-        event_id=value.event_id,
-        text=value.text or "",
-        button_phase=value.button_phase.value if value.button_phase is not None else "",
-    )
-    optional_fields = ("x", "y", "dx", "dy", "key", "button")
-    for field in optional_fields:
-        _set_optional(message, field, getattr(value, field))
-    return message
-
-
-def _message_to_control(message: ControlMessage) -> ControlSignal:
-    values: dict[str, Any] = {"kind": ControlKind(message.kind), "event_id": message.event_id}
-    optional_fields = ("x", "y", "dx", "dy", "key", "button")
-    for field in optional_fields:
-        if message.HasField(field):
-            values[field] = getattr(message, field)
-    if message.text:
-        values["text"] = message.text
-    if message.button_phase:
-        values["button_phase"] = ButtonPhase(message.button_phase)
-    return ControlSignal(**values)
-
-
 def actuation_to_payload(value: ActuationSignal) -> bytes:
-    message = ActuationMessage(session_id=value.session_id, unit_index=value.unit_index)
+    message = ActuationMessage(
+        session_id=value.session_id, unit_index=value.unit_index,
+        protocol_version="avm-realtime-v1",
+    )
     message.speech.sample_rate_hz = value.speech.sample_rate_hz
     message.speech.channels = value.speech.channels
     message.speech.encoding = value.speech.encoding
     message.speech.silent = value.speech.silent
     message.speech.pcm = value.speech.pcm
-    message.controls.extend(_control_to_message(control) for control in value.controls)
     return message.SerializeToString()
 
 
@@ -131,6 +99,8 @@ def actuation_to_message(value: ActuationSignal) -> bytes:
 
 def message_to_actuation(payload: bytes) -> ActuationSignal:
     message = ActuationMessage.FromString(payload)
+    if message.protocol_version != "avm-realtime-v1":
+        raise ValueError("incompatible AVM actuation protocol")
     if not message.HasField("speech"):
         raise ValueError("ActuationSignal requires a speech message")
     return ActuationSignal(
@@ -143,7 +113,6 @@ def message_to_actuation(payload: bytes) -> ActuationSignal:
             encoding=message.speech.encoding,
             silent=message.speech.silent,
         ),
-        controls=tuple(_message_to_control(control) for control in message.controls),
     )
 
 

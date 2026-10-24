@@ -26,6 +26,10 @@ def main(argv: list[str] | None = None) -> int:
     evaluate_parser.add_argument("--split", choices=("validation", "test"), default="validation")
     evaluate_parser.add_argument("--device")
     evaluate_parser.add_argument("--codec-threshold", type=float, default=0.9)
+    migration_parser = subparsers.add_parser("migrate-latentloop")
+    migration_parser.add_argument("--config", required=True)
+    migration_parser.add_argument("--source", required=True)
+    migration_parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     if args.command == "train":
         run(
@@ -36,6 +40,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif args.command == "run-recipe":
         run_recipe(args.recipe, overrides=args.overrides, run_id=args.run_id)
+    elif args.command == "migrate-latentloop":
+        from training.migration import migrate_latentloop_weights
+
+        print(migrate_latentloop_weights(load_config(args.config), args.source, args.output))
     else:
         config = load_config(args.config)
         result = evaluate_checkpoint(

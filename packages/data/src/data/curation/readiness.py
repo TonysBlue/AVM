@@ -56,6 +56,25 @@ def check_readiness(
     formal_dataset = dataset == "canary"
 
     if formal_dataset and config.training.stage == "rl":
+        rl = config.training.rl
+        for label, value in (
+            ("dialogue Harness", rl.environment_socket),
+            ("speech codec", rl.codec_socket),
+            ("perceptual Judge", rl.reward_socket),
+        ):
+            endpoint = Path(value).expanduser() if value else None
+            if endpoint is None or not endpoint.is_socket():
+                missing.append(f"{label} socket: {value or 'unconfigured'}")
+        session_manifest = Path(rl.session_manifest).expanduser() if rl.session_manifest else None
+        if session_manifest is None or not session_manifest.is_file():
+            missing.append("AVM dialogue lifetime session manifest")
+        else:
+            sessions = read_jsonl(session_manifest)
+            if len(sessions) != 1 or not all(
+                isinstance(sessions[0].get(key), str) and sessions[0][key].strip()
+                for key in ("session_id", "scenario_id")
+            ):
+                invalid.append("AVM requires one identified dialogue lifetime session")
         guard_assets = (
             ("SFT replay manifest", config.training.rl.sft_replay_manifest, False),
             ("SFT replay shards", config.training.rl.sft_replay_shards, True),
@@ -152,7 +171,7 @@ def check_readiness(
                 encoded_entries = read_jsonl(processed_manifest)
                 required_metadata = {
                     "protocol_version",
-                    "action_schema_id",
+                    "schema_id",
                     "runtime_identity",
                     "environment_id",
                     "environment_version",
@@ -161,6 +180,12 @@ def check_readiness(
                     invalid.append(
                         f"{split} processed manifest is missing runtime identity"
                     )
+                if any(
+                    entry.get("schema_id") != "avm-episode-v1"
+                    or entry.get("protocol_version") != "avm-realtime-v1"
+                    for entry in encoded_entries
+                ):
+                    invalid.append(f"{split} processed manifest has incompatible AVM identity")
                 if {entry["episode_id"] for entry in source_entries} != {
                     entry["episode_id"] for entry in encoded_entries
                 }:
@@ -199,6 +224,8 @@ def check_readiness(
             try:
                 payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
                 metadata = payload.get("metadata", {})
+                if metadata.get("model_schema_id") != "avm-model-v1":
+                    invalid.append("initial checkpoint is not an AVM model")
                 if metadata.get("codec_id") != config.data.codec_id:
                     invalid.append("initial checkpoint codec_id differs from Canary config")
                 if metadata.get("codec_revision") != config.data.codec_revision:

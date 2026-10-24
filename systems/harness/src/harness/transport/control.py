@@ -33,8 +33,6 @@ from contracts.protocol import (
     receipt_to_payload,
 )
 
-from harness.action.safety import SafetyGate
-
 
 def _read_exact(connection: socket.socket, size: int) -> bytes:
     output = bytearray()
@@ -49,7 +47,7 @@ def _read_exact(connection: socket.socket, size: int) -> bytes:
 @dataclass(slots=True)
 class _SessionState:
     backend: Any
-    initial_snapshot_id: str
+    scenario_id: str
     next_unit: int
     observation: ObservationSignal
 
@@ -64,9 +62,7 @@ class HarnessControlServer:
         *,
         expected_environment_id: str | None = None,
         expected_environment_version: str | None = None,
-        expected_protocol_version: str = "realtime-v2",
-        expected_action_schema_id: str = "structured-action-v1",
-        safety_gate: SafetyGate | None = None,
+        expected_protocol_version: str = "avm-realtime-v1",
     ) -> None:
         self.backend_factory = backend_factory
         self.socket_path = Path(socket_path).expanduser()
@@ -74,8 +70,6 @@ class HarnessControlServer:
         self.expected_environment_id = expected_environment_id
         self.expected_environment_version = expected_environment_version
         self.expected_protocol_version = expected_protocol_version
-        self.expected_action_schema_id = expected_action_schema_id
-        self.safety_gate = safety_gate or SafetyGate()
         self._backends: dict[str, _SessionState] = {}
         self._lock = threading.RLock()
         self._closed = threading.Event()
@@ -150,7 +144,6 @@ class HarnessControlServer:
                     "environment_id": str(backend.environment_id),
                     "environment_version": str(backend.environment_version),
                     "protocol_version": self.expected_protocol_version,
-                    "action_schema_id": self.expected_action_schema_id,
                 }
                 if (
                     self.expected_environment_id
@@ -171,15 +164,15 @@ class HarnessControlServer:
             raise ValueError("session_id is required")
         with self._lock:
             if operation == "start_lifetime_session":
-                snapshot_id = str(request.get("initial_snapshot_id", ""))
-                if not snapshot_id:
-                    raise ValueError("initial_snapshot_id is required")
-                backend = self.backend_factory()
+                scenario_id = str(request.get("scenario_id", ""))
+                if not scenario_id:
+                    raise ValueError("scenario_id is required")
                 if session_id in self._backends:
                     raise ValueError("lifetime session already exists")
+                backend = self.backend_factory()
                 try:
                     observation = backend.start_lifetime_session(
-                        snapshot_id, int(request["seed"]), session_id
+                        scenario_id, int(request["seed"]), session_id
                     )
                     self._validate_observation(observation, session_id, 0)
                 except Exception:
@@ -188,7 +181,7 @@ class HarnessControlServer:
                     raise
                 self._backends[session_id] = _SessionState(
                     backend=backend,
-                    initial_snapshot_id=snapshot_id,
+                    scenario_id=scenario_id,
                     next_unit=0,
                     observation=observation,
                 )
@@ -217,8 +210,6 @@ class HarnessControlServer:
                 output = message_to_actuation(payload)
                 if output.session_id != session_id or output.unit_index != state.next_unit:
                     raise ValueError("actuation session or unit is out of order")
-                for control in output.controls:
-                    self.safety_gate.validate(control)
                 observation, receipt = self._apply_backend(state, output)
                 self._validate_observation(observation, session_id, state.next_unit + 1)
                 if receipt.session_id != session_id or receipt.unit_index != state.next_unit:
@@ -274,21 +265,20 @@ class HarnessControlClient:
             "environment_id",
             "environment_version",
             "protocol_version",
-            "action_schema_id",
         }
         if not required.issubset(identity):
             raise RuntimeError("Harness identity is incomplete")
         return identity
 
     def start_lifetime_session(
-        self, initial_snapshot_id: str, seed: int, session_id: str
+        self, scenario_id: str, seed: int, session_id: str
     ) -> ObservationSignal:
-        if not initial_snapshot_id or not session_id:
-            raise ValueError("initial_snapshot_id and session_id are required")
+        if not scenario_id or not session_id:
+            raise ValueError("scenario_id and session_id are required")
         response = self._request(
             {
                 "operation": "start_lifetime_session",
-                "initial_snapshot_id": initial_snapshot_id,
+                "scenario_id": scenario_id,
                 "seed": seed,
                 "session_id": session_id,
             }

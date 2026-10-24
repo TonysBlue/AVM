@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import io
 import threading
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -13,10 +12,9 @@ from contracts import (
     SpeechSignal,
 )
 from model import StreamingLatentLoop
-from model.types import ActionFrame, SpeechMode, SpeechSamplingConfig, StreamUnit
-from PIL import Image
-from runtime.action import ActionFrameDecoder
+from model.types import SpeechMode, SpeechSamplingConfig, StreamUnit
 from runtime.config import ProjectConfig
+from runtime.video import validate_video_time, video_tensor
 
 
 @dataclass(slots=True)
@@ -25,7 +23,7 @@ class ModelSession:
     state: object
     next_unit: int = 0
     speech_active: bool = False
-    action_decoder: ActionFrameDecoder = field(default_factory=ActionFrameDecoder)
+    last_observation: ObservationSignal | None = None
 
 
 class ModelService:
@@ -47,8 +45,8 @@ class ModelService:
                 payload.get("metadata"), dict
             ):
                 raise ValueError("model service requires a complete current checkpoint")
-            if payload.get("metadata", {}).get("action_schema_id") != config.model.action_schema_id:
-                raise ValueError("checkpoint action schema does not match model service")
+            if payload.get("metadata", {}).get("model_schema_id") != "avm-model-v1":
+                raise ValueError("checkpoint AVM model schema does not match model service")
             weights = payload.get("model")
             if not isinstance(weights, dict):
                 raise ValueError("model checkpoint has no state dict")
@@ -61,8 +59,8 @@ class ModelService:
     def identity(self) -> dict[str, str]:
         return {
             "service": "model-service",
-            "protocol_version": "realtime-v2",
-            "action_schema_id": self.config.model.action_schema_id,
+            "protocol_version": "avm-realtime-v1",
+            "model_schema_id": "avm-model-v1",
             "codec_id": self.config.data.codec_id,
         }
 
@@ -86,21 +84,8 @@ class ModelService:
             del self._sessions[session_id]
 
     @staticmethod
-    def _screen_tensor(observation: ObservationSignal) -> torch.Tensor:
-        screen = observation.screen
-        expected = screen.width * screen.height * 3
-        if (
-            screen.encoding == "raw"
-            and screen.pixel_format == "rgb24"
-            and len(screen.image) == expected
-        ):
-            array = np.frombuffer(screen.image, dtype=np.uint8).reshape(
-                screen.height, screen.width, 3
-            )
-        else:
-            with Image.open(io.BytesIO(screen.image)) as image:
-                array = np.asarray(image.convert("RGB"))
-        return torch.from_numpy(array.copy()).permute(2, 0, 1).float().div(255).unsqueeze(0)
+    def _video_tensor(observation: ObservationSignal) -> torch.Tensor:
+        return video_tensor(observation.video)
 
     def _unit(self, observation: ObservationSignal) -> StreamUnit:
         dtype = np.float32 if observation.mic.encoding == "pcm_f32le" else np.int16
@@ -111,19 +96,17 @@ class ModelService:
             raise ValueError("mic signal must contain exactly one 80 ms unit")
         if not np.isfinite(mic).all() or np.max(np.abs(mic)) > 1.0:
             raise ValueError("mic signal PCM must be normalized and finite")
-        screen = self._screen_tensor(observation)
+        video = self._video_tensor(observation)
         zeros = torch.zeros(1, 1, self.config.model.speech_codebooks, dtype=torch.long)
         return StreamUnit(
             timestamp_ms=torch.tensor([observation.timestamp_ms], dtype=torch.long),
             delta_ms=torch.tensor([observation.delta_ms], dtype=torch.long),
             mic_audio=torch.from_numpy(mic.copy()).reshape(1, -1),
-            screen=screen,
+            video=video,
             speech_mode=torch.zeros(1, dtype=torch.long),
             speech_mode_mask=torch.zeros(1, dtype=torch.bool),
             speech_codes=zeros,
             speech_codec_mask=torch.zeros(1, 1, dtype=torch.bool),
-            action=ActionFrame.no_action(1),
-            action_supervision_mask=torch.zeros(1, dtype=torch.bool),
         )
 
     @torch.inference_mode()
@@ -134,14 +117,15 @@ class ModelService:
                 raise KeyError("unknown model session")
             if observation.unit_index != session.next_unit:
                 raise ValueError("model unit index is out of order")
+            validate_video_time(
+                observation, session.last_observation, self.config.data.video_max_age_ms
+            )
             unit = self._unit(observation).to(self.device)
             generated = self.model.generate_step(
                 unit,
                 session.state,
                 SpeechSamplingConfig(temperature=0.8, top_k=250, greedy=False),
             )
-            session.state = generated.output.state
-            session.next_unit += 1
             mode = int(generated.speech_mode.item())
             if mode == int(SpeechMode.SILENCE):
                 session.speech_active = False
@@ -167,13 +151,11 @@ class ModelService:
                     raise RuntimeError("speech codec decoder returned invalid PCM values")
                 speech = SpeechSignal(values.tobytes(), silent=False)
                 session.speech_active = True
-            controls = session.action_decoder.push(
-                generated.action_frame.as_contract(),
-                event_id=f"{observation.session_id}-{observation.unit_index}",
-            )
+            session.state = generated.output.state
+            session.next_unit += 1
+            session.last_observation = observation
             return ActuationSignal(
                 observation.session_id,
                 observation.unit_index,
                 speech,
-                controls,
             )

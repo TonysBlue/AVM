@@ -3,9 +3,9 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "latentloop-workspace"
+name = "avm-workspace"
 version = "0.1.0"
-description = "Streaming multimodal latent-memory training research harness"
+description = "AVM: realtime full-duplex audio-video dialogue without text, based on LatentLoop"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [

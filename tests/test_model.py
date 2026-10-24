@@ -36,7 +36,6 @@ def test_recurrent_state_is_bounded_and_heads_receive_gradients(
     assert model.semantic_slot_identity.grad is not None
     assert model.slow_memories[0].write_gate.weight.grad is not None
     assert model.speech_head.depth_embeddings[0].weight.grad is not None
-    assert model.action_head.kind_output.weight.grad is not None
     assert model.speech_head.mode.weight.grad is not None
     assert output.perceiver_slots.shape == (1, 16, smoke_config.model.model_dim)
     assert output.jepa_prediction.shape == output.perceiver_slots.shape
@@ -112,25 +111,3 @@ def test_speech_loss_follows_model_dtype(smoke_config: ProjectConfig) -> None:
     losses = compute_losses(output, unit)
 
     assert torch.isfinite(losses["speech"])
-
-
-def test_stream_unit_casts_continuous_action_targets_with_model_dtype(
-    smoke_config: ProjectConfig,
-) -> None:
-    model = StreamingLatentLoop(smoke_config.model).half()
-    unit = SyntheticEpisodeDataset(smoke_config.data, smoke_config.model).make_episode(0).units[0]
-
-    unit = unit.to("cpu", dtype=torch.float16)
-    output = model(
-        unit,
-        model.initial_state(1, "cpu"),
-        unit.speech_codes,
-        speech_teacher_mode=unit.speech_mode,
-        action_teacher_frame=unit.action,
-        action_teacher_mask=unit.action_supervision_mask,
-    )
-
-    assert unit.action.coordinate_residual.dtype == torch.float16
-    assert unit.action.scroll_delta.dtype == torch.float16
-    assert unit.action.kind.dtype == torch.long
-    assert torch.isfinite(output.action.kind_logits).all()

@@ -5,14 +5,12 @@ import base64
 import numpy as np
 import pytest
 from contracts import (
-    ActionFrame,
-    ActionKind,
     ActuationSignal,
     EnvironmentReceipt,
     MicSignal,
     ObservationSignal,
-    ScreenSignal,
     SpeechSignal,
+    VideoSignal,
 )
 from data.capture import CaptureLedger, ExpertCaptureSession
 from data.replay import replay_ledger
@@ -25,7 +23,7 @@ class RecordingHarness:
         self.closed: list[str] = []
 
     def start_lifetime_session(
-        self, initial_snapshot_id: str, seed: int, session_id: str
+        self, scenario_id: str, seed: int, session_id: str
     ) -> ObservationSignal:
         return self._observation(session_id, 0)
 
@@ -33,8 +31,8 @@ class RecordingHarness:
         return {
             "environment_id": "test-physical",
             "environment_version": "1",
-            "protocol_version": "realtime-v2",
-            "action_schema_id": "structured-action-v1",
+            "protocol_version": "avm-realtime-v1",
+            "schema_id": "avm-episode-v1",
         }
 
     def apply(
@@ -57,7 +55,7 @@ class RecordingHarness:
             unit_index * 80,
             80,
             MicSignal(np.zeros(1920, dtype=np.float32).tobytes()),
-            ScreenSignal(b"x" * (224 * 224 * 3), 224, 224),
+            VideoSignal(b"x" * (224 * 224 * 3), 224, 224, captured_at_ms=0, revision=0),
         )
 
 
@@ -73,24 +71,23 @@ def _codec_metadata() -> dict[str, str]:
         "codec_revision": "revision",
         "environment_id": "test-physical",
         "environment_version": "1",
-        "protocol_version": "realtime-v2",
-        "action_schema_id": "structured-action-v1",
+        "protocol_version": "avm-realtime-v1",
+        "schema_id": "avm-episode-v1",
     }
 
 
 def test_expert_capture_persists_and_exports_current_episode(tmp_path) -> None:
     harness = RecordingHarness()
     ledger = CaptureLedger(tmp_path / "capture", session_id="capture-1", lineage_id="line-1")
-    session = ExpertCaptureSession(harness, ledger, seed=7, snapshot_id="base")
+    session = ExpertCaptureSession(harness, ledger, seed=7, scenario_id="base")
     session.start()
-    session.step(ActionFrame(ActionKind.NO_ACTION), _speech(0.25))
+    session.step(_speech(0.25))
     episode = session.finish(_codec_metadata())
     session.close()
 
     assert (tmp_path / "capture" / "sealed.json").is_file()
     assert (tmp_path / "capture" / "transitions.jsonl").is_file()
     assert len(ledger.records) == len(episode.units) == 1
-    assert episode.units[0].action_supervision_mask.item()
     assert episode.units[0].speech_codec_mask.item()
     assert episode.units[0].speech_mode.item() == 1
     assert episode.target_speech is not None
@@ -107,16 +104,15 @@ def test_capture_refuses_non_contiguous_results(tmp_path) -> None:
             output,
             RecordingHarness._observation("capture-1", 2),
             EnvironmentReceipt("capture-1", 0, True),
-            ActionFrame(ActionKind.NO_ACTION),
         )
 
 
-def test_model_free_replay_uses_recorded_speech_and_actions(tmp_path, monkeypatch) -> None:
+def test_model_free_replay_uses_recorded_speech(tmp_path, monkeypatch) -> None:
     capture_harness = RecordingHarness()
     ledger = CaptureLedger(tmp_path / "capture", session_id="capture-1", lineage_id="line-1")
-    capture = ExpertCaptureSession(capture_harness, ledger, seed=7, snapshot_id="base")
+    capture = ExpertCaptureSession(capture_harness, ledger, seed=7, scenario_id="base")
     capture.start()
-    capture.step(ActionFrame(ActionKind.NOOP), _speech(0.5))
+    capture.step(_speech(0.5))
     capture.finish(_codec_metadata())
     capture.close()
 
@@ -125,7 +121,7 @@ def test_model_free_replay_uses_recorded_speech_and_actions(tmp_path, monkeypatc
     events = replay_ledger(
         tmp_path / "capture",
         harness=replay_harness,
-        snapshot_id="base",
+        scenario_id="base",
         seed=8,
         session_id="replay-1",
         realtime=True,
@@ -134,7 +130,6 @@ def test_model_free_replay_uses_recorded_speech_and_actions(tmp_path, monkeypatc
     assert len(events) == 1
     assert events[0].receipt_accepted
     assert replay_harness.outputs[0].speech.pcm == _speech(0.5).pcm
-    assert len(replay_harness.outputs[0].controls) == 1
     assert replay_harness.closed == ["replay-1"]
 
 
@@ -153,7 +148,7 @@ def test_replay_rejects_invalid_speech_before_harness_apply() -> None:
                 }
             ],
             session_id="replay",
-            snapshot_id="base",
+            scenario_id="base",
             seed=1,
             realtime=False,
         )
@@ -177,7 +172,7 @@ def test_replay_rejects_nonphysical_webdataset_audio_clock(
             data_config=smoke_config.data,
             model_config=smoke_config.model,
             harness=harness,
-            snapshot_id="base",
+            scenario_id="base",
             seed=1,
             session_id="replay",
             episode_id=episode.episode_id,
@@ -187,9 +182,9 @@ def test_replay_rejects_nonphysical_webdataset_audio_clock(
 def test_sealed_capture_rejects_payload_tampering(tmp_path) -> None:
     harness = RecordingHarness()
     ledger = CaptureLedger(tmp_path / "capture", session_id="capture-1", lineage_id="line-1")
-    capture = ExpertCaptureSession(harness, ledger, seed=7, snapshot_id="base")
+    capture = ExpertCaptureSession(harness, ledger, seed=7, scenario_id="base")
     capture.start()
-    capture.step(ActionFrame(ActionKind.NO_ACTION), _speech())
+    capture.step(_speech())
     capture.finish(_codec_metadata())
     capture.close()
     payload = tmp_path / "capture" / "actuation-000000000000.pb"
@@ -202,16 +197,16 @@ def test_sealed_capture_rejects_payload_tampering(tmp_path) -> None:
 def test_replay_rejects_unsealed_capture(tmp_path) -> None:
     harness = RecordingHarness()
     ledger = CaptureLedger(tmp_path / "capture", session_id="capture-1", lineage_id="line-1")
-    capture = ExpertCaptureSession(harness, ledger, seed=7, snapshot_id="base")
+    capture = ExpertCaptureSession(harness, ledger, seed=7, scenario_id="base")
     capture.start()
-    capture.step(ActionFrame(ActionKind.NO_ACTION), _speech())
+    capture.step(_speech())
     capture.close()
 
     with pytest.raises(ValueError, match="not sealed"):
         replay_ledger(
             tmp_path / "capture",
             harness=RecordingHarness(),
-            snapshot_id="base",
+            scenario_id="base",
             seed=1,
             session_id="replay",
             realtime=False,

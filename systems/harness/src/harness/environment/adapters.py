@@ -1,4 +1,4 @@
-"""Deployment adapters for the physical QEMU/KVM Harness boundary."""
+"""Deployment adapters for the realtime audiovisual dialogue Harness boundary."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from contracts import ActuationSignal, EnvironmentReceipt, ObservationSignal
 
 
 class SensorAdapter(Protocol):
-    """Captures only physical microphone/screen/time signals."""
+    """Captures only physical microphone/video/time signals."""
 
     def capture(self, session_id: str, unit_index: int) -> ObservationSignal: ...
 
@@ -16,7 +16,7 @@ class SensorAdapter(Protocol):
 
 
 class ActuatorAdapter(Protocol):
-    """Plays speech and executes already-decoded, validated controls."""
+    """Plays speech while capture continues."""
 
     def apply(self, output: ActuationSignal) -> EnvironmentReceipt: ...
 

@@ -2,24 +2,22 @@ from __future__ import annotations
 
 from contracts import ActuationSignal, EnvironmentReceipt, ObservationSignal
 
-from harness.action.executor import ControlExecutor
 from harness.session import Session
 
 
 class HarnessService:
     """Coordinates sensors, Model Service client, actuators, and environment."""
 
-    def __init__(self, environment, model_client, executor: ControlExecutor) -> None:
+    def __init__(self, environment, model_client) -> None:
         self.environment = environment
         self.model_client = model_client
-        self.executor = executor
         self.session: Session | None = None
 
     def start_lifetime_session(
-        self, initial_snapshot_id: str, seed: int, session_id: str
+        self, scenario_id: str, seed: int, session_id: str
     ) -> ObservationSignal:
         observation = self.environment.start_lifetime_session(
-            initial_snapshot_id, seed, session_id
+            scenario_id, seed, session_id
         )
         if observation.session_id != session_id:
             raise ValueError("environment observation has wrong session identity")
@@ -37,8 +35,6 @@ class HarnessService:
             raise RuntimeError("Harness session is not active")
         self.session.accept_observation(observation)
         output = self.model_client.infer(observation)
-        for control in output.controls:
-            self.executor.gate.validate(control)
         next_observation, receipt = self.environment.apply(output)
         self.session.accept_actuation(output)
         return next_observation, receipt, output

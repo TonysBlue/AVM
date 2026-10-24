@@ -2,8 +2,6 @@ from data.capture import (
     CaptureLedger,
     CaptureTransition,
     ExpertCaptureSession,
-    action_frame_from_dict,
-    action_frame_to_dict,
     episode_from_capture,
     speech_signal_from_base64,
 )
@@ -34,8 +32,6 @@ __all__ = [
     "CaptureLedger",
     "CaptureTransition",
     "ExpertCaptureSession",
-    "action_frame_from_dict",
-    "action_frame_to_dict",
     "episode_from_capture",
     "speech_signal_from_base64",
     "import_speech_manifest",

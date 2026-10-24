@@ -12,7 +12,8 @@ LOCK="${LATENTLOOP_SOURCE_LOCK:-$ROOT/registry/source-lock.json}"
 VOICES="${LATENTLOOP_VOICE_LIBRARY:-$ROOT/registry/voices/voice-library.json}"
 TTS_HASH="b144ef55b51ce8cfb79a73c90dbba0bdaba4e451c0ebcfab20f769264f84a608"
 NORMALIZER="uv run --project $REPO/tools/curation python $REPO/tools/curation/normalize_adapter.py"
-SCREEN="uv run --project $REPO/tools/curation python $REPO/tools/curation/screen_adapter.py"
+VIDEO_SOURCES="${AVM_VIDEO_SOURCES:-$ROOT/registry/avm-video-sources.jsonl}"
+VIDEO="uv run --project $REPO/tools/curation python $REPO/tools/curation/video_adapter.py --sources $VIDEO_SOURCES"
 TTS="env COSYVOICE_SOCKET=$RUN_DIR/cosyvoice.sock uv run --project $REPO/tools/cosyvoice python $REPO/tools/cosyvoice/adapter.py"
 ASR="env SENSEVOICE_SOCKET=$RUN_DIR/sensevoice.sock uv run --project $REPO/tools/asr python $REPO/tools/asr/adapter.py"
 
@@ -23,6 +24,10 @@ ASR="env SENSEVOICE_SOCKET=$RUN_DIR/sensevoice.sock uv run --project $REPO/tools
 [[ -f "$CFG" ]] || { printf 'config is absent: %s\n' "$CFG" >&2; exit 2; }
 
 prepare() {
+  [[ -f "$VIDEO_SOURCES" ]] || {
+    printf 'AVM requires a locked audiovisual source manifest: %s\n' "$VIDEO_SOURCES" >&2
+    exit 2
+  }
   "$REPO/scripts/bootstrap-canary.sh"
   "$REPO/scripts/bootstrap-canary-models.sh"
   "$REPO/scripts/canary-mimi-worker.sh" stop
@@ -32,7 +37,7 @@ prepare() {
     --config "$CFG" --root "$ROOT" \
     --lock "$LOCK" --download --extract --library "$VOICES" \
     --synth-command "$TTS" --asr-command "$ASR" --model-sha256 "$TTS_HASH" \
-    --normalize-command "$NORMALIZER" --screen-command "$SCREEN"
+    --normalize-command "$NORMALIZER" --video-command "$VIDEO"
   "$REPO/scripts/canary-speech-workers.sh" stop
   trap - EXIT
 }

@@ -146,15 +146,25 @@ def _validate_record(root: Path, record: dict[str, Any]) -> dict[str, Any]:
         if not -24.0 <= loudness <= -22.0:
             raise ValueError("source audio is outside -23 +/- 1 LUFS")
         require_sha256(normalization.get("metrics_sha256"), "source loudness metrics")
-    if record.get("screens"):
-        screen_path = Path(record["screens"])
-        if not screen_path.is_absolute():
-            screen_path = root / screen_path
-        if not screen_path.is_file():
-            raise FileNotFoundError(f"screen artifact is absent: {screen_path}")
-        expected_screen = require_sha256(record.get("screens_sha256"), "screen artifact")
-        if sha256_file(screen_path) != expected_screen:
-            raise ValueError("screen artifact hash mismatch")
+    if not record.get("videos"):
+        raise ValueError("AVM episode requires a video asset")
+    if not record.get("fixture", False):
+        provenance = record.get("video_source_identity", {})
+        require_sha256(provenance.get("source_sha256"), "video source")
+        require_sha256(provenance.get("source_manifest_sha256"), "video source manifest")
+        if not all(
+            provenance.get(key) for key in ("source_license", "source_version", "alignment_id")
+        ):
+            raise ValueError("AVM video source provenance is incomplete")
+    if record.get("videos"):
+        video_path = Path(record["videos"])
+        if not video_path.is_absolute():
+            video_path = root / video_path
+        if not video_path.is_file():
+            raise FileNotFoundError(f"video artifact is absent: {video_path}")
+        expected_video = require_sha256(record.get("videos_sha256"), "video artifact")
+        if sha256_file(video_path) != expected_video:
+            raise ValueError("video artifact hash mismatch")
     return {
         "episode_id": record["episode_id"],
         "duration_seconds": timeline_samples / SAMPLE_RATE,
@@ -425,7 +435,7 @@ def audit_canary_data(
         f"- Timeline hours: {total / 3600:.4f}\n"
         f"- Chinese/English target: 80%/20%\n"
         f"- Sources: 30% public speech, 50% synthetic computer dialogue, "
-        f"15% adjacent turns, 5% screen tasks\n"
+        f"15% adjacent turns, 5% video tasks\n"
         f"- Computer-assistant timeline: approximately 55%\n"
         f"- Runtime speech path: direct codec generation; no TTS\n"
         f"- Quality gates: automatic only; no manual review ledger\n"

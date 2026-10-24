@@ -1,4 +1,4 @@
-# LatentLoop Agent Instructions
+# AVM Agent Instructions
 
 This file is the repository-level operating contract for coding agents and
 developers. Read it before changing code, configuration, data tooling, or
@@ -8,11 +8,16 @@ always take precedence over this document.
 
 ## Project Mission
 
-LatentLoop is a research and training harness for an always-on, real-time,
-full-duplex multimodal agent. The model consumes one mixed microphone stream,
-screen frames, and recurrent state; it directly predicts speech codec tokens
-and has an independent action head. The surrounding harness is responsible
-for workers, playback, computer control, and deployment integration.
+AVM (Audio-Video Model without Text) is a research harness for universal realtime
+full-duplex Omni dialogue. Its architecture derives from LatentLoop with the
+action path removed. The model consumes mixed microphone audio, general video
+and time, and directly predicts speech codec tokens. It has no runtime text
+channel, computer control, tool output or video generation. The Harness owns
+audiovisual capture, playback, feedback and session lifecycle. Screen sharing is
+one video source, not a GUI task assumption.
+
+The AVM contract in `docs/avm-contract.md` defines audiovisual dialogue protocols
+and acceptance. Formal training remains Pretrain -> SFT -> Online Recurrent PPO.
 
 The repository is a research implementation, not a product UI. Prefer
 reproducibility, explicit contracts, measurable gates, and small reversible
@@ -52,7 +57,7 @@ capability with tests. Only add stage-specific branching when the data/model
 contract genuinely differs, and document why in the design documentation.
 
 正式训练 recipe 的阶段语义固定为 `Pretrain -> SFT -> Online RL`。当前只保留
-Canary 正式规模，并完整执行这三个阶段，共享模型、训练循环、真实隔离电脑环境协议、
+Canary 正式规模，并完整执行这三个阶段，共享模型、训练循环、实时音视频对话环境协议、
 reward 定义和 checkpoint 谱系；Online RL 的当前正式算法固定为 Online Recurrent PPO。
 后续规模必须等本机 Canary 验证形成数据、显存、吞吐和质量证据后重新设计，不预留未验证
 的规模配置或资产入口。正式单智能体 Online RL 始终只有一个 active
@@ -60,8 +65,8 @@ lifetime session，不以环境并发分叉时间线。不得用 fixture、
 离线 rollout、critic/value head 或只训练输出 head 来替代任何正式阶段。测试可以
 使用显式标记的进程内环境实现协议契约，但该实现不得成为正式配置的回退路径。
 
-Pretrain 和 SFT 都训练 InputEncoder、Backbone、MemoryUpdater、Speech Head 与
-Unified Action Head。Online RL 使用 Online Recurrent PPO：冻结的 SFT reference policy、单一生命期
+Pretrain 和 SFT 都训练 InputEncoder、Backbone、MemoryUpdater 与 Speech Head。
+Online RL 使用 Online Recurrent PPO：冻结的 SFT reference policy、单一生命期
 ObservationSignal 时间线、感知 Reward Event、time-discount GAE 和 clipped policy ratio，
 全模型接受策略梯度；训练专用 Value Head 不跨 Model Service 物理边界，也不新增独立
 memory loss。所有优化仍由
@@ -74,15 +79,13 @@ memory loss。所有优化仍由
 The final architecture has three runtime systems and shared packages:
 
 - `Model Core` is pure tensor/model code. It owns the `Z/H/KV` recurrent state,
-  Backbone, Speech Head, Unified Action Head, and token sampling.
+  Backbone, Speech Head, and token sampling.
 - `Model Service` is the physical-signal inference boundary. It accepts mixed
-  microphone PCM, screen pixels/revision, and time; it returns speech PCM and
-  decoded `ControlSignal` events. It never captures devices or executes OS
-  input.
+  microphone PCM, video pixels/revision, and time; it returns speech PCM.
+  It never captures devices.
 - `Training System` owns Pretrain, SFT, Online RL, replay, optimizer,
   checkpoint lineage, and evaluation. It uses the same Model Core as serving.
-- `Harness System` owns microphone/screen capture, playback, isolated computer
-  lifecycle, ControlSignal validation/safety, execution, receipts, and reward.
+- `Harness System` owns microphone/video capture, playback, session lifecycle, and reward.
 - `Data` is a shared persistence domain for capture, replay, supervised
   episodes, rollout traces, manifests, and readiness. It is not private to the
   training package.
@@ -90,12 +93,10 @@ The final architecture has three runtime systems and shared packages:
 The Model Service data plane is strictly physical signals:
 
 ```text
-ObservationSignal: mic PCM + screen pixels/revision + time
-ActuationSignal:   speech PCM + decoded ControlSignal events
+ObservationSignal: mic PCM + video pixels/revision + time
+ActuationSignal:   speech PCM
 ```
 
-Action tokens remain an internal Model Core/training/data representation and
-are decoded before crossing the Model Service-to-Harness execution boundary.
 Rewards, receipts, task success, DOM/accessibility data, and other hidden
 environment fields are control-plane or training metadata only; they never
 enter `ObservationSignal`.
@@ -107,7 +108,7 @@ single package is migrated into these domains in one coherent change; no
 stage-specific implementation or fixture fallback is part of a formal run.
 
 - `packages/model/src/model/`: Model Core streaming model, encoders, attention,
-  speech head, action head, and recurrent state. Keep model math here; do not
+  speech head and recurrent state. Keep model math here; do not
   put orchestration here.
 - `systems/training/src/training/`: the shared optimizer/recipe dispatch,
   TBPTT, checkpoint lineage, metrics, and validation/test orchestration.
@@ -145,14 +146,13 @@ Do not silently change these invariants:
 - State: recurrent KV, semantic memory slots, per-layer SlowMemory, audio cache, and speech-local state are
   carried across TBPTT chunks within an episode and detached between chunks.
   State resets at episode/session boundaries, not at every sampling window.
-- Inputs: training examples use the single mixed microphone signal plus screen
+- Inputs: training examples use the single mixed microphone signal plus video
   input. Do not add privileged source stems, playback-reference channels, or
   inference-only labels to the model input contract.
 - Outputs: speech is direct codec-token prediction. TTS is a data-preparation
-  adapter only; it is not a second runtime speech target. Actions remain an
-  independent action head.
+  adapter only; it is not a second runtime speech target.
 - Long-term memory has no independent target or auxiliary write loss. It is
-  trained through future Speech/Action losses flowing from heads through
+  trained through future Speech losses flowing from heads through
   `H_t -> Backbone -> C_t/SlowMemory`, while JEPA supervises prediction from `H_t`.
 - Do not reintroduce balanced-window training or per-window state reset. If
   speech supervision is sparse, fix the dataset composition and report the
@@ -229,10 +229,10 @@ RL receives the final SFT checkpoint as both its initial policy and frozen
 reference. Frozen/selective modes remain available only for explicitly named
 non-formal local experiments and must not appear in formal recipes.
 
-The final Harness backend is an isolated QEMU/KVM computer. A per-session
-overlay is restored from a task snapshot; SPICE/virtual audio provide screen
-and microphone integration and a controlled input backend executes validated
-`ControlSignal` events. A process-local fake backend is test-only.
+The formal Harness backend is a realtime audiovisual dialogue session with
+continuous capture and bounded playback. Camera, video streams and screen
+sharing are video sources, not GUI environments. A process-local fake backend
+is test-only. Missing formal devices, scenario assets or Judge fail closed.
 
 ## W&B Local and Experiment Tracking
 
@@ -267,12 +267,12 @@ changes or rewrite generated artifacts.
 文档职责必须保持清晰：`docs/realtime-multimodal-latent-loop.md` 是本项目的
 顶层架构文档，必须与当前
 实现、数据协议、训练目标、运行时状态和最终目标方案一致；Speech Head 的专项
-协议见 `docs/direct-speech.md`，统一电脑操控输出空间的专项协议见
-`docs/unified-action.md`。顶层架构文档不得停留在脱离代码的研究草案，且应保留
+协议见 `docs/direct-speech.md`，AVM 场景与验收契约见
+`docs/avm-contract.md`。顶层架构文档不得停留在脱离代码的研究草案，且应保留
 完整结构和中文表达。
 
 三阶段训练的专项契约由 `docs/three-stage-training.md` 描述，Online RL 的
-Online Recurrent PPO 算法、真实隔离环境和 reward 协议由
+Online Recurrent PPO 算法、实时对话环境和 reward 协议由
 `docs/online-recurrent-ppo-training.md` 描述。它们是最终系统
 架构的一部分，不写中间讨论过程、开发排期或阶段性妥协方案；顶层架构和本地平台
 文档应引用并保持语义一致。
@@ -301,8 +301,8 @@ finishing:
 
 ```bash
 uv run pytest -q
-uv run ruff check src tests tools/curation
-uv run python -m compileall -q src tools/curation
+uv run ruff check packages systems tests tools/curation
+uv run python -m compileall -q packages systems tools/curation
 bash -n scripts/*.sh scripts/lib/*.sh
 git diff --check
 ```

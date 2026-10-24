@@ -13,8 +13,7 @@ import soundfile as sf
 import torch
 import webdataset as wds
 from braceexpand import braceexpand
-from contracts import ACTION_SCHEMA_ID
-from model.types import ActionFrame, Episode, StreamUnit
+from model.types import Episode, StreamUnit
 from runtime.config import DataConfig, ModelConfig
 
 
@@ -58,9 +57,13 @@ def _load_timeline(data: bytes) -> dict[str, np.ndarray]:
 
 
 def episode_to_sample(episode: Episode) -> dict[str, bytes | str]:
+    if episode.metadata.get("schema_id") != "avm-episode-v1":
+        raise ValueError("episode requires the AVM schema identity")
+    if any(key.startswith("action_") for key in episode.metadata):
+        raise ValueError("legacy action metadata is not supported by AVM")
     units = episode.units
     audio = torch.cat([unit.mic_audio for unit in units], dim=0).cpu().numpy()
-    screens = np.stack([unit.screen[0].cpu().numpy() for unit in units])
+    videos = np.stack([unit.video[0].cpu().numpy() for unit in units])
     metadata = {
         **episode.metadata,
         "episode_id": episode.episode_id,
@@ -70,49 +73,17 @@ def episode_to_sample(episode: Episode) -> dict[str, bytes | str]:
     metadata.setdefault(
         "runtime_identity",
         {
-            "protocol_version": metadata.get("protocol_version", "realtime-v2"),
+            "protocol_version": metadata.get("protocol_version", "avm-realtime-v1"),
             "environment_id": metadata.get("environment_id", "recorded"),
             "environment_version": metadata.get("environment_version", "1"),
-            "action_schema_id": metadata.get("action_schema_id", ACTION_SCHEMA_ID),
         },
     )
-    decoded_controls = metadata.get("decoded_controls", [])
-    receipts = metadata.get("receipts", [])
     timeline = {
         "timestamps_ms": np.asarray([int(u.timestamp_ms.item()) for u in units]),
         "delta_ms": np.asarray([int(u.delta_ms.item()) for u in units]),
         "speech_mode": np.asarray([int(u.speech_mode.item()) for u in units], dtype=np.int64),
         "speech_mode_mask": np.asarray([bool(u.speech_mode_mask.item()) for u in units]),
         "speech_codec_mask": np.stack([u.speech_codec_mask[0].cpu().numpy() for u in units]),
-        "action_kind": torch.cat([u.action.kind for u in units], dim=0).cpu().numpy(),
-        "action_supervision_mask": torch.cat(
-            [u.action_supervision_mask for u in units], dim=0
-        ).cpu().numpy(),
-        "action_coordinate_cell": torch.cat(
-            [u.action.coordinate_cell for u in units], dim=0
-        ).cpu().numpy(),
-        "action_coordinate_residual": torch.cat(
-            [u.action.coordinate_residual for u in units], dim=0
-        ).cpu().numpy(),
-        "action_button": torch.cat([u.action.button for u in units], dim=0).cpu().numpy(),
-        "action_button_phase": torch.cat(
-            [u.action.button_phase for u in units], dim=0
-        ).cpu().numpy(),
-        "action_scroll_delta": torch.cat(
-            [u.action.scroll_delta for u in units], dim=0
-        ).cpu().numpy(),
-        "action_text_bytes": torch.cat(
-            [u.action.text_bytes for u in units], dim=0
-        ).cpu().numpy(),
-        "action_text_length": torch.cat(
-            [u.action.text_length for u in units], dim=0
-        ).cpu().numpy(),
-        "action_hotkey_keys": torch.cat(
-            [u.action.hotkey_keys for u in units], dim=0
-        ).cpu().numpy(),
-        "action_hotkey_length": torch.cat(
-            [u.action.hotkey_length for u in units], dim=0
-        ).cpu().numpy(),
     }
     codes = torch.cat([u.speech_codes for u in units], dim=0).cpu().numpy().astype(np.uint16)
     target_speech = (
@@ -125,12 +96,10 @@ def episode_to_sample(episode: Episode) -> dict[str, bytes | str]:
         "meta.json": json.dumps(metadata, sort_keys=True).encode("utf-8"),
         "mic.flac": _audio_bytes(audio, int(metadata["sample_rate"])),
         "target_speech.flac": _audio_bytes(target_speech, int(metadata["sample_rate"])),
-        "screen.npz": _numpy_bytes(screens, compressed=True),
+        "video.npz": _numpy_bytes(videos, compressed=True),
         "timeline.npz": _timeline_bytes(timeline),
         "speech_codes.npy": _numpy_bytes(codes),
         "turns.json": json.dumps(episode.metadata.get("turns", [])).encode("utf-8"),
-        "controls.json": json.dumps(decoded_controls, sort_keys=True).encode("utf-8"),
-        "receipts.json": json.dumps(receipts, sort_keys=True).encode("utf-8"),
     }
 
 
@@ -245,15 +214,14 @@ class EpisodeShardReader:
         episode_id = str(sample["__key__"])
         required_metadata = (
             "stage",
+            "schema_id",
             "dataset_scale",
             "sample_kind",
             "supervision_kind",
-            "action_source",
             "task_id",
             "environment_id",
             "environment_version",
             "protocol_version",
-            "action_schema_id",
             "codec_id",
             "codec_revision",
             "runtime_identity",
@@ -261,8 +229,12 @@ class EpisodeShardReader:
         missing = [key for key in required_metadata if key not in metadata]
         if missing:
             raise ValueError(f"trajectory metadata is missing for {episode_id}: {missing}")
-        if metadata["action_schema_id"] != ACTION_SCHEMA_ID:
-            raise ValueError(f"action schema mismatch for {episode_id}")
+        if metadata["schema_id"] != "avm-episode-v1":
+            raise ValueError(f"AVM episode schema mismatch for {episode_id}")
+        if metadata["protocol_version"] != "avm-realtime-v1":
+            raise ValueError(f"AVM protocol mismatch for {episode_id}")
+        if any(key.startswith("action_") for key in metadata):
+            raise ValueError("legacy action metadata is not supported by AVM")
         for key in ("codec_id", "codec_weight_hash", "codec_revision"):
             if metadata.get(key) != getattr(self.data, key):
                 raise ValueError(f"{key} mismatch for {episode_id}")
@@ -278,12 +250,10 @@ class EpisodeShardReader:
     def _decode(self, sample: dict[str, Any], shard_index: int, sample_index: int) -> Episode:
         metadata = json.loads(sample["meta.json"])
         turns = json.loads(sample["turns.json"])
-        if "controls.json" in sample:
-            metadata["decoded_controls"] = json.loads(sample["controls.json"])
-        if "receipts.json" in sample:
-            metadata["receipts"] = json.loads(sample["receipts.json"])
-        screens = _load_numpy(sample["screen.npz"], compressed=True)
+        videos = _load_numpy(sample["video.npz"], compressed=True)
         timeline = _load_timeline(sample["timeline.npz"])
+        if any(key.startswith("action_") for key in timeline):
+            raise ValueError("legacy action timelines are not AVM episodes")
         codes = _load_numpy(sample["speech_codes.npy"])
         audio, sample_rate = sf.read(io.BytesIO(sample["mic.flac"]), dtype="float32")
         target_speech, target_sample_rate = sf.read(
@@ -296,15 +266,15 @@ class EpisodeShardReader:
         audio = audio.reshape(unit_count, int(metadata["unit_audio_samples"]))
         units: list[StreamUnit] = []
         for index in range(unit_count):
-            if index >= len(screens):
-                raise ValueError("screen timeline is shorter than episode")
-            screen = screens[index]
+            if index >= len(videos):
+                raise ValueError("video timeline is shorter than episode")
+            video = videos[index]
             units.append(
                 StreamUnit(
                     timestamp_ms=torch.tensor([timeline["timestamps_ms"][index]], dtype=torch.long),
                     delta_ms=torch.tensor([timeline["delta_ms"][index]], dtype=torch.long),
                     mic_audio=torch.from_numpy(audio[index]).float()[None],
-                    screen=torch.from_numpy(screen).float()[None],
+                    video=torch.from_numpy(video).float()[None],
                     speech_mode=torch.tensor([timeline["speech_mode"][index]], dtype=torch.long),
                     speech_mode_mask=torch.tensor(
                         [timeline["speech_mode_mask"][index]], dtype=torch.bool
@@ -313,37 +283,6 @@ class EpisodeShardReader:
                     speech_codec_mask=torch.from_numpy(timeline["speech_codec_mask"][index]).bool()[
                         None
                     ],
-                    action=ActionFrame(
-                        kind=torch.tensor([timeline["action_kind"][index]], dtype=torch.long),
-                        coordinate_cell=torch.tensor(
-                            [timeline["action_coordinate_cell"][index]], dtype=torch.long
-                        ),
-                        coordinate_residual=torch.from_numpy(
-                            timeline["action_coordinate_residual"][index]
-                        ).float()[None],
-                        button=torch.tensor([timeline["action_button"][index]], dtype=torch.long),
-                        button_phase=torch.tensor(
-                            [timeline["action_button_phase"][index]], dtype=torch.long
-                        ),
-                        scroll_delta=torch.from_numpy(
-                            timeline["action_scroll_delta"][index]
-                        ).float()[None],
-                        text_bytes=torch.from_numpy(
-                            timeline["action_text_bytes"][index]
-                        ).long()[None],
-                        text_length=torch.tensor(
-                            [timeline["action_text_length"][index]], dtype=torch.long
-                        ),
-                        hotkey_keys=torch.from_numpy(
-                            timeline["action_hotkey_keys"][index]
-                        ).long()[None],
-                        hotkey_length=torch.tensor(
-                            [timeline["action_hotkey_length"][index]], dtype=torch.long
-                        ),
-                    ),
-                    action_supervision_mask=torch.tensor(
-                        [timeline["action_supervision_mask"][index]], dtype=torch.bool
-                    ),
                 )
             )
         episode = Episode(

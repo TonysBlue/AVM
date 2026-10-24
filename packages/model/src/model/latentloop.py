@@ -5,13 +5,11 @@ from runtime.config import ModelConfig
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
-from model.action import ActionHead
 from model.attention import SlowMemory, StreamingTransformerLayer
 from model.encoders import DeltaTimeEncoder, StreamingAudioEncoder, VisionEncoder
 from model.perceiver import JEPAHead, Perceiver
 from model.speech import FactorizedSpeechHead
 from model.types import (
-    ActionFrame,
     GenerationOutput,
     LayerKV,
     RecurrentState,
@@ -73,7 +71,6 @@ class StreamingLatentLoop(nn.Module):
             SlowMemory(config.num_heads, dim // config.num_heads) for _ in self.layers
         )
         self.speech_head = FactorizedSpeechHead(config)
-        self.action_head = ActionHead(config)
         self.value_head = ValueHead(config.model_dim, config.num_heads)
         self.reset_parameters()
 
@@ -128,14 +125,13 @@ class StreamingLatentLoop(nn.Module):
                     batch_size, self.config.speech_codebooks, device=device, dtype=torch.long
                 ),
             ),
-            action_local=self.action_head.initial_state(batch_size, device, dtype),
             unit_index=torch.zeros(batch_size, device=device, dtype=torch.long),
         )
 
     def encode_observation(self, unit: StreamUnit, audio_cache: Tensor) -> tuple[Tensor, Tensor]:
         """Encode an observation without advancing any cognitive recurrent state."""
         audio, next_audio_cache = self.audio_encoder(unit.mic_audio, audio_cache)
-        vision = self.vision_encoder(unit.screen)
+        vision = self.vision_encoder(unit.video)
         delta_time = self.delta_time_encoder(unit.delta_ms)
         inputs = torch.cat(
             (
@@ -154,8 +150,6 @@ class StreamingLatentLoop(nn.Module):
         *,
         speech_teacher_codes: Tensor | None = None,
         speech_teacher_mode: Tensor | None = None,
-        action_teacher_frame: ActionFrame | None = None,
-        action_teacher_mask: Tensor | None = None,
         sampling: SpeechSamplingConfig | None = None,
     ) -> StepOutput:
         perceived, audio_cache = self.encode_observation(unit, state.audio_cache)
@@ -235,13 +229,6 @@ class StreamingLatentLoop(nn.Module):
         next_codes = torch.where(
             mode[:, None] == int(SpeechMode.SPEECH), next_codes, torch.zeros_like(next_codes)
         )
-        action, action_local = self.action_head(
-            hidden,
-            state.action_local,
-            action_teacher_frame,
-            action_teacher_mask,
-            sampling_temperature=(sampling.temperature if sampling is not None else None),
-        )
         predicted_next = self.jepa_head(hidden)
         next_state = RecurrentState(
             layer_kv=tuple(new_caches),
@@ -250,14 +237,12 @@ class StreamingLatentLoop(nn.Module):
             audio_cache=audio_cache,
             hidden=hidden,
             speech_local=SpeechLocalState(temporal=speech_temporal, previous_codes=next_codes),
-            action_local=action_local,
             unit_index=state.unit_index + 1,
         )
         return StepOutput(
             state=next_state,
             speech_mode_logits=speech_mode_logits,
             speech_codec_logits=speech_codec_logits,
-            action=action,
             hidden=hidden,
             perceiver_slots=perceived,
             jepa_prediction=predicted_next,
@@ -272,16 +257,12 @@ class StreamingLatentLoop(nn.Module):
         speech_teacher_codes: Tensor | None = None,
         *,
         speech_teacher_mode: Tensor | None = None,
-        action_teacher_frame: ActionFrame | None = None,
-        action_teacher_mask: Tensor | None = None,
     ) -> StepOutput:
         return self.forward_step(
             unit,
             state,
             speech_teacher_codes=speech_teacher_codes,
             speech_teacher_mode=speech_teacher_mode,
-            action_teacher_frame=action_teacher_frame,
-            action_teacher_mask=action_teacher_mask,
         )
 
     @torch.no_grad()
@@ -293,7 +274,6 @@ class StreamingLatentLoop(nn.Module):
             output=output,
             speech_mode=output.selected_speech_mode,
             speech_codes=output.state.speech_local.previous_codes[:, None],
-            action_frame=output.action.frame,
         )
 
     def parameter_count(self) -> int:

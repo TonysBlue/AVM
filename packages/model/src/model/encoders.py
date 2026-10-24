@@ -45,8 +45,8 @@ class VisionEncoder(nn.Module):
         self.position = nn.Parameter(torch.zeros(1, 16, dim))
         nn.init.normal_(self.position, std=0.02)
 
-    def forward(self, screen: Tensor) -> Tensor:
-        features = self.encoder(screen)
+    def forward(self, video: Tensor) -> Tensor:
+        features = self.encoder(video)
         batch, channels, height, width = features.shape
         if height % 4 or width % 4:
             raise ValueError("vision feature grid must be divisible into 4x4 tokens")

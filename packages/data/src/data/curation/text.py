@@ -18,32 +18,56 @@ from data.curation.spec import (
 )
 
 INTENTS = {
-    "browser_search": 20,
-    "file_management": 15,
-    "document_editing": 15,
-    "apps_windows": 15,
-    "system_settings": 10,
-    "state_reading": 10,
-    "confirmation": 10,
-    "safe_recovery": 5,
+    "visual_description": 20,
+    "event_tracking": 15,
+    "audiovisual_grounding": 15,
+    "shared_viewing": 15,
+    "conversation_memory": 10,
+    "clarification": 10,
+    "interruption_recovery": 10,
+    "everyday_dialogue": 5,
 }
 
 ZH_COPY = {
-    "browser_search": ("搜索今天的天气。", "我正在查看天气信息。", "结果已经显示。"),
-    "file_management": ("找到下载目录里的报告。", "我正在检查下载目录。", "已经找到报告。"),
-    "document_editing": ("在文档末尾加入会议日期。", "我会先定位文档末尾。", "日期已经加入。"),
-    "apps_windows": ("切换到浏览器窗口。", "我正在查看当前窗口。", "已经切换到浏览器。"),
-    "system_settings": ("把系统音量调低一些。", "我会先读取当前音量。", "音量已经调低。"),
-    "state_reading": ("告诉我当前打开了哪些应用。", "我正在查看任务栏。", "我已经读到应用列表。"),
-    "confirmation": (
-        "关闭这个未保存的窗口。",
-        "窗口包含未保存内容，是否继续关闭？",
-        "我会等待你的确认。",
+    'visual_description': (
+        '请描述你看到的画面。',
+        '我会结合画面来描述。',
+        '我们可以继续观察细节。',
     ),
-    "safe_recovery": (
-        "把所有文件永久删除。",
-        "这个操作不可逆，我不会直接执行。",
-        "可以先建立备份再处理。",
+    'event_tracking': (
+        '留意接下来发生的变化。',
+        '我会持续观察。',
+        '我们来回顾刚才的变化。',
+    ),
+    'audiovisual_grounding': (
+        '结合画面和声音一起听看。',
+        '我正在同时观察和聆听。',
+        '我们可以讨论声音与画面的联系。',
+    ),
+    'shared_viewing': (
+        '陪我一起看这段视频。',
+        '好，我们边看边聊。',
+        '你想聊刚才的哪个细节？',
+    ),
+    'conversation_memory': (
+        '请记住我们刚才谈到的事情。',
+        '我会结合之前的对话继续交流。',
+        '我们可以回顾前面的内容。',
+    ),
+    'clarification': (
+        '我说的是刚才那个。',
+        '你指的是画面里的哪一处？',
+        '请再描述一点，我继续听。',
+    ),
+    'interruption_recovery': (
+        '先停一下，我补充一句。',
+        '好的，你说。',
+        '我们接着刚才的话题。',
+    ),
+    'everyday_dialogue': (
+        '今天想和你聊聊天。',
+        '好啊，你想从什么开始？',
+        '我在听，你继续。',
     ),
 }
 
@@ -56,45 +80,45 @@ _FORMAL_DURATION_COUNTS = {
     ("en", "test"): (2, 1, 0),
 }
 EN_COPY = {
-    "browser_search": (
-        "Search for today's weather.",
-        "I am checking the weather.",
-        "The results are visible.",
+    'visual_description': (
+        'Describe what you see.',
+        'Let us look at the scene together.',
+        'We can discuss the details.',
     ),
-    "file_management": (
-        "Find the report in Downloads.",
-        "I am looking for the report now.",
-        "I found the report.",
+    'event_tracking': (
+        'Watch for changes.',
+        'I will keep watching.',
+        'Let us review what changed.',
     ),
-    "document_editing": (
-        "Add the meeting date to the document.",
-        "I will locate the end first.",
-        "The date is now added.",
+    'audiovisual_grounding': (
+        'Listen and watch together.',
+        'I am following the sound and video.',
+        'We can discuss their connection.',
     ),
-    "apps_windows": (
-        "Switch to the browser window.",
-        "I am checking the open windows.",
-        "The browser is active.",
+    'shared_viewing': (
+        'Watch this video with me.',
+        'Sure, let us talk as we watch.',
+        'Which detail would you like to discuss?',
     ),
-    "system_settings": (
-        "Turn the system volume down.",
-        "I will read the current level.",
-        "The volume is lower.",
+    'conversation_memory': (
+        'Remember what we discussed.',
+        'I will keep our earlier conversation in mind.',
+        'We can revisit it together.',
     ),
-    "state_reading": (
-        "Tell me which applications are open.",
-        "I am inspecting the taskbar.",
-        "I can now read the list.",
+    'clarification': (
+        'I meant that one earlier.',
+        'Which part of the scene do you mean?',
+        'Tell me a little more.',
     ),
-    "confirmation": (
-        "Close this unsaved window.",
-        "It has unsaved work. Should I continue?",
-        "I will wait for confirmation.",
+    'interruption_recovery': (
+        'Pause, I want to add something.',
+        'Go ahead, I am listening.',
+        'Let us return to our conversation.',
     ),
-    "safe_recovery": (
-        "Permanently delete every file.",
-        "That is irreversible, so I will not run it directly.",
-        "We can create a backup first.",
+    'everyday_dialogue': (
+        'I would like to chat.',
+        'What would you like to talk about?',
+        'I am listening.',
     ),
 }
 
@@ -149,11 +173,11 @@ def _allocate_duration(plans: list[dict[str, Any]], target: float) -> None:
         plan["target_duration_seconds"] = round(duration, 6)
 
 
-def _shift_screen_duration(plans: list[dict[str, Any]], target: float) -> None:
+def _shift_video_duration(plans: list[dict[str, Any]], target: float) -> None:
     current = sum(
         float(plan["target_duration_seconds"])
         for plan in plans
-        if plan["category"] == "screen_task"
+        if plan["category"] == "video_task"
     )
     delta = target - current
     if abs(delta) < 1e-6:
@@ -162,12 +186,12 @@ def _shift_screen_duration(plans: list[dict[str, Any]], target: float) -> None:
     for plan in plans:
         groups.setdefault((str(plan["language"]), str(plan["split"])), []).append(plan)
     for group in groups.values():
-        screen = [plan for plan in group if plan["category"] == "screen_task"]
+        video = [plan for plan in group if plan["category"] == "video_task"]
         dialogue = [plan for plan in group if plan["category"] == "synthetic_dialogue"]
         if delta > 0:
-            receivers, donors = screen, dialogue
+            receivers, donors = video, dialogue
         else:
-            receivers, donors = dialogue, screen
+            receivers, donors = dialogue, video
         receiver_capacity = sum(
             _duration_bounds(plan)[1] - float(plan["target_duration_seconds"]) for plan in receivers
         )
@@ -197,13 +221,13 @@ def _shift_screen_duration(plans: list[dict[str, Any]], target: float) -> None:
         if abs(delta) <= 1e-6:
             break
     if abs(delta) > 1e-5:
-        raise ValueError("plan mix cannot reach the screen-task duration quota")
+        raise ValueError("plan mix cannot reach the video-task duration quota")
     for plan in plans:
         plan["target_duration_seconds"] = round(float(plan["target_duration_seconds"]), 6)
 
 
-def _select_screen_plans(
-    plans: list[dict[str, Any]], screen_target: float, group_target: float
+def _select_video_plans(
+    plans: list[dict[str, Any]], video_target: float, group_target: float
 ) -> tuple[set[str], float]:
     by_class = {
         duration_class: sorted(
@@ -212,7 +236,7 @@ def _select_screen_plans(
         )
         for duration_class in ("short", "medium", "long")
     }
-    desired_count = max(1, round(len(plans) / 11), int(-(-screen_target // 60)))
+    desired_count = max(1, round(len(plans) / 11), int(-(-video_target // 60)))
     total_lower = sum(_duration_bounds(plan)[0] for plan in plans)
     total_upper = sum(_duration_bounds(plan)[1] for plan in plans)
     best: tuple[tuple[float, int, float], tuple[int, int, int], float] | None = None
@@ -234,11 +258,11 @@ def _select_screen_plans(
                 feasible_upper = min(upper, group_target - dialogue_lower)
                 if feasible_lower > feasible_upper:
                     continue
-                attainable = min(max(screen_target, feasible_lower), feasible_upper)
+                attainable = min(max(video_target, feasible_lower), feasible_upper)
                 score = (
-                    abs(attainable - screen_target),
+                    abs(attainable - video_target),
                     abs(count - desired_count),
-                    abs((feasible_lower + feasible_upper) / 2 - screen_target),
+                    abs((feasible_lower + feasible_upper) / 2 - video_target),
                 )
                 if best is None or score < best[0]:
                     best = (
@@ -249,7 +273,7 @@ def _select_screen_plans(
         if best is not None and best[0][0] <= 1e-9 and best[0][1] == 0:
             break
     if best is None:
-        raise ValueError("no duration-class assignment can satisfy the screen quota")
+        raise ValueError("no duration-class assignment can satisfy the video quota")
     counts = best[1]
     selected = {
         plan["plan_id"]
@@ -265,18 +289,18 @@ def _calibrate_plan_mix(plans: list[dict[str, Any]], dataset: str) -> None:
         groups.setdefault((str(plan["language"]), str(plan["split"])), []).append(plan)
     total_seconds = dataset_spec(dataset).duration_seconds
     for (language, split), group in groups.items():
-        requested_screen = (
+        requested_video = (
             total_seconds * 0.05 * LANGUAGE_FRACTIONS[language] * SPLIT_FRACTIONS[split]
         )
         group_target = total_seconds * 0.55 * LANGUAGE_FRACTIONS[language] * SPLIT_FRACTIONS[split]
-        screen_ids, attainable_screen = _select_screen_plans(group, requested_screen, group_target)
+        video_ids, attainable_video = _select_video_plans(group, requested_video, group_target)
         for plan in group:
             plan["category"] = (
-                "screen_task" if plan["plan_id"] in screen_ids else "synthetic_dialogue"
+                "video_task" if plan["plan_id"] in video_ids else "synthetic_dialogue"
             )
         _allocate_duration(group, group_target)
-        _shift_screen_duration(group, attainable_screen)
-    _shift_screen_duration(plans, total_seconds * 0.05)
+        _shift_video_duration(group, attainable_video)
+    _shift_video_duration(plans, total_seconds * 0.05)
     for plan in plans:
         plan["recipe_sha256"] = plan_recipe_sha256(plan)
 
@@ -319,7 +343,7 @@ def _plan(
         "medium": 16 + index % 9,
         "long": 32 + index % 9,
     }[duration_class]
-    category = "screen_task" if fixture and index in {0, 9, 10} else "synthetic_dialogue"
+    category = "video_task" if fixture and index in {0, 9, 10} else "synthetic_dialogue"
     # IDs are stable within the Canary data catalog.
     plan_id = f"plan-{language}-{plan_offset + index:04d}"
     template_id = f"{dataset}-{intent}-{split}-v{index % 7}"

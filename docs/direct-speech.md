@@ -3,7 +3,7 @@
 > 状态：最终目标语音协议
 > 日期：2026-08-20
 > 关联顶层架构：[实时流多模态 LatentLoop 完整方案](realtime-multimodal-latent-loop.md)
-> 对称动作协议：[统一电脑动作输出协议](unified-action.md)
+> 场景契约：[AVM 全双工音视频对话](avm-contract.md)
 
 ## 1. 完成边界
 
@@ -77,7 +77,7 @@ Speech Head 的 temporal state 和 previous codes 只负责相邻声学帧连续
 meta.json
 mic.flac
 target_speech.flac
-screen.npz
+video.npz
 timeline.npz
 speech_codes.npy
 turns.json

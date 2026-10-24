@@ -38,6 +38,12 @@ def _record(**overrides: object) -> dict[str, object]:
 
 
 def _write_manifest(path: Path, record: dict[str, object]) -> None:
+    if "videos" not in record:
+        video_path = path.parent / "test-video.npz"
+        np.savez_compressed(
+            video_path, ticks=np.array([0]), frames=np.ones((1, 3, 224, 224), dtype=np.float32)
+        )
+        record = {**record, "videos": str(video_path)}
     path.write_text(json.dumps(record) + "\n", encoding="utf-8")
 
 
@@ -80,7 +86,6 @@ def test_import_pads_to_80_ms_and_sets_speech_only_masks(
     for unit in episode.units:
         assert unit.speech_mode_mask.all()
         assert unit.speech_mode.item() == SpeechMode.SILENCE
-        assert not unit.action_supervision_mask.any()
 
 
 def test_import_generates_start_continue_and_stop(

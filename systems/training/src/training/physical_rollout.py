@@ -14,18 +14,17 @@ from contracts import (
     SpeechSignal,
 )
 from harness.transport.control import HarnessControlClient
-from model.types import ActionFrame, SpeechMode, StreamUnit
-from PIL import Image
-from runtime.action import ActionFrameDecoder
+from model.types import SpeechMode, StreamUnit
 from runtime.codec_worker import CodecWorkerClient
 from runtime.config import ProjectConfig
+from runtime.video import video_tensor
 
 
 class PhysicalRolloutClient:
     """Bridges Model Core token samples to Harness physical signals.
 
     The Harness never receives token arrays.  Token log-probabilities remain in
-    the training trace while this client decodes speech/action output at the
+    the training trace while this client decodes speech output at the
     training-to-environment boundary.
     """
 
@@ -55,30 +54,30 @@ class PhysicalRolloutClient:
         )
         self.codec.health()
         self.session_id: str | None = None
-        self.actions = ActionFrameDecoder()
+        self.speech_active = False
 
     def identity(self) -> dict[str, str]:
         return self.harness.identity()
 
     def start_lifetime_session(
-        self, initial_snapshot_id: str, seed: int, session_id: str
+        self, scenario_id: str, seed: int, session_id: str
     ) -> ObservationSignal:
         self.session_id = session_id
         self.codec.reset(session_id, replay=False)
-        self.actions.reset()
-        return self.harness.start_lifetime_session(initial_snapshot_id, seed, session_id)
+        self.speech_active = False
+        return self.harness.start_lifetime_session(scenario_id, seed, session_id)
 
     def resume_lifetime_session(
         self,
         session_id: str,
         expected_next_unit: int,
         *,
-        pending_utf8: bytes = b"",
         speech_history: Iterable[torch.Tensor] = (),
     ) -> ObservationSignal:
         self.session_id = session_id
-        self.actions.pending_utf8 = pending_utf8
-        self.codec.restore_decode_history(session_id, speech_history)
+        history = tuple(speech_history)
+        self.codec.restore_decode_history(session_id, history)
+        self.speech_active = bool(history)
         return self.harness.resume_lifetime_session(session_id, expected_next_unit)
 
     def actuation(
@@ -86,13 +85,15 @@ class PhysicalRolloutClient:
         observation: ObservationSignal,
         mode: torch.Tensor,
         codes: torch.Tensor,
-        action_frame: ActionFrame,
     ) -> ActuationSignal:
         selected_mode = int(mode.reshape(-1)[0].item())
         if selected_mode == int(SpeechMode.SILENCE):
+            self.speech_active = False
             pcm = np.zeros(self.config.data.unit_audio_samples, dtype=np.float32).tobytes()
             speech = SpeechSignal(pcm, silent=True)
         else:
+            if not self.speech_active:
+                self.codec.reset(observation.session_id, replay=False)
             code_tensor = codes.detach().to("cpu").long().reshape(
                 self.config.model.speech_frames_per_unit, self.config.model.speech_codebooks
             )
@@ -105,20 +106,16 @@ class PhysicalRolloutClient:
             if not np.isfinite(values).all() or np.max(np.abs(values)) > 1.0:
                 raise RuntimeError("codec decoder returned invalid PCM values")
             speech = SpeechSignal(values.tobytes())
-        controls = self.actions.push(
-            action_frame.as_contract(),
-            event_id=f"{observation.session_id}-{observation.unit_index}",
-        )
-        return ActuationSignal(observation.session_id, observation.unit_index, speech, controls)
+            self.speech_active = True
+        return ActuationSignal(observation.session_id, observation.unit_index, speech)
 
     def step(
         self,
         observation: ObservationSignal,
         mode: torch.Tensor,
         codes: torch.Tensor,
-        action_frame: ActionFrame,
     ) -> tuple[ObservationSignal, EnvironmentReceipt, ActuationSignal]:
-        output = self.actuation(observation, mode, codes, action_frame)
+        output = self.actuation(observation, mode, codes)
         next_observation, receipt = self.harness.apply(output)
         return next_observation, receipt, output
 
@@ -141,28 +138,16 @@ def observation_to_stream_unit(observation: ObservationSignal, config: ProjectCo
         raise ValueError("physical observation microphone has wrong unit size")
     if not np.isfinite(mic).all() or np.max(np.abs(mic)) > 1.0:
         raise ValueError("physical observation microphone PCM is not normalized and finite")
-    import io
-
-    expected = observation.screen.width * observation.screen.height * 3
-    if observation.screen.encoding == "raw" and len(observation.screen.image) == expected:
-        pixels = np.frombuffer(observation.screen.image, dtype=np.uint8).reshape(
-            observation.screen.height, observation.screen.width, 3
-        )
-    else:
-        with Image.open(io.BytesIO(observation.screen.image)) as image:
-            pixels = np.asarray(image.convert("RGB"))
-    screen = torch.from_numpy(pixels.copy()).permute(2, 0, 1).float().div(255).unsqueeze(0)
+    video = video_tensor(observation.video)
     return StreamUnit(
         timestamp_ms=torch.tensor([observation.timestamp_ms], dtype=torch.long),
         delta_ms=torch.tensor([observation.delta_ms], dtype=torch.long),
         mic_audio=torch.from_numpy(mic.copy()).reshape(1, -1),
-        screen=screen,
+        video=video,
         speech_mode=torch.zeros(1, dtype=torch.long),
         speech_mode_mask=torch.zeros(1, dtype=torch.bool),
         speech_codes=torch.zeros(
             1, config.model.speech_frames_per_unit, config.model.speech_codebooks, dtype=torch.long
         ),
         speech_codec_mask=torch.zeros(1, config.model.speech_frames_per_unit, dtype=torch.bool),
-        action=ActionFrame.no_action(1),
-        action_supervision_mask=torch.zeros(1, dtype=torch.bool),
     )

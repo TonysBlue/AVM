@@ -22,11 +22,10 @@ class RewardVector:
     task: float
     speech_quality: float
     latency_quality: float
-    action_efficiency: float
     safety_quality: float
 
     def __post_init__(self) -> None:
-        for name in ("task", "speech_quality", "latency_quality", "action_efficiency"):
+        for name in ("task", "speech_quality", "latency_quality"):
             value = getattr(self, name)
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"reward {name} must be in [0, 1]")
@@ -36,9 +35,8 @@ class RewardVector:
     @property
     def interaction(self) -> float:
         return (
-            0.4 * self.speech_quality
-            + 0.3 * self.latency_quality
-            + 0.3 * self.action_efficiency
+            0.5 * self.speech_quality
+            + 0.5 * self.latency_quality
         )
 
     @property

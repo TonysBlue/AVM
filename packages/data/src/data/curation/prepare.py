@@ -177,7 +177,7 @@ def prepare_canary_data(
     asr_command: str | None = None,
     model_sha256: str | None = None,
     normalize_command: str | None = None,
-    screen_command: str | None = None,
+    video_command: str | None = None,
     socket_path: str | Path | None = None,
     encode: bool = False,
     mimi_report_dir: str | Path | None = None,
@@ -212,7 +212,7 @@ def prepare_canary_data(
             root,
             fixture=fixture,
             normalize_command=normalize_command,
-            screen_command=screen_command,
+            video_command=video_command,
         )
         mimi_path: str | None = None
         if client:

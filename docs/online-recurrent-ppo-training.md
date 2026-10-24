@@ -1,8 +1,8 @@
-# Online RL：Online Recurrent PPO 与真实隔离电脑环境
+# Online RL：Online Recurrent PPO 与实时音视频对话环境
 
 > 状态：最终目标 Online RL 阶段、Online Recurrent PPO 算法与环境协议
 > 日期：2026-08-29
-> 关联文档：[统一三阶段训练架构](three-stage-training.md) · [统一电脑动作输出协议](unified-action.md) · [物理 Rollout 闭环](protocols/physical-rollout.md)
+> 关联文档：[统一三阶段训练架构](three-stage-training.md) · [AVM 契约](avm-contract.md) · [物理 Rollout 闭环](protocols/physical-rollout.md)
 
 ## 1. RL 模型结构
 
@@ -12,17 +12,15 @@ ObservationSignal O_t
     -> Perceiver -> P_t
     -> Backbone(P_t, H_(t-1), C_(t-1), RecentKV, SlowMemory)
     -> H_t, C_t
-       |-> SpeechHead -> speech codec action
-       |-> ActionHead -> structured ControlSignal
+       |-> SpeechHead -> speech codec tokens
        `-> JEPAHead -> predict P_(t+1)
 
-speech/action -> Harness -> physical environment -> O_(t+1), receipt, RewardEvent
+speech -> Harness -> physical environment -> O_(t+1), receipt, RewardEvent
 ```
 
 $$
 S_t = \left\{
-H_t,C_t,\mathrm{RecentKV}_t,\mathrm{SlowMemory}_t,
-\mathrm{speech\_local}_t,\mathrm{action\_local}_t
+H_t,C_t,\mathrm{RecentKV}_t,\mathrm{SlowMemory}_t,\mathrm{speech\_local}_t
 \right\}
 $$
 
@@ -43,7 +41,7 @@ $$
 {}+\lambda_{\mathrm{SFT}}\mathcal{L}_{\mathrm{SFT\ replay}}
 $$
 
-`C_t` 不直接进入动作头，但通过 Backbone 影响 `H_t`。Reward、receipt、Judge 和任务
+`C_t` 不直接进入语音头，但通过 Backbone 影响 `H_t`。Reward、receipt、Judge 和任务
 成功信息只进入 Training System，不进入 `ObservationSignal`。PPO candidate 在 375-unit
 recurrent window 上重放完整状态，更新 Encoder、Perceiver、Backbone、语义 memory、
 SlowMemory write controller 及输出头；通过 finite、reference-KL 和 SFT preservation
@@ -52,13 +50,11 @@ SlowMemory write controller 及输出头；通过 finite、reference-KL 和 SFT 
 
 ## 2. 环境选择
 
-Canary 是当前唯一正式规模，使用真实隔离电脑环境。正式 Online RL 当前唯一允许的算法是
-Online Recurrent PPO。它使用一个生命期
-session 的连续物理时间线；任务完成不会重置模型或环境。只有显式 session close、设备
-更换或故障恢复才建立新的 lineage。Canary 不使用 fixture 或离线 rollout 替代环境。
-
-进程内 deterministic environment 只用于单元测试协议和梯度，不允许被正式配置选择，
-也不能在真实环境连接失败时自动回退。
+正式环境为实时音视频对话会话：单一 active lifetime session，持续采集，
+当前策略语音经独立播放回流，对端可实时回应、插话或改变视频情境。
+摄像头、一般视频与屏幕共享只是视频来源，不包含电脑控制或快照。
+FFmpeg/PulseAudio 后端要求明确配置真实设备与 scenario_id；缺失时 fail closed。
+录播可构成场景素材，离线 rollout 和预生成对端回复不得替代正式在线交互。
 
 ## 3. 环境协议
 
@@ -66,14 +62,13 @@ Harness control client 提供以下语义：
 
 ```text
 identity() -> EnvironmentIdentity
-start_lifetime_session(session_id, initial_snapshot) -> ObservationSignal
+start_lifetime_session(scenario_id, seed, session_id) -> ObservationSignal
 apply(session_id, unit_index, ActuationSignal)
     -> ObservationSignal + EnvironmentReceipt
 close_lifetime_session(session_id)
 ```
 
-`EnvironmentIdentity` 包含 environment ID、version、protocol version 和 action schema
-identity。连接、reset 和每次 apply 都必须校验 session/task/unit 顺序。
+`EnvironmentIdentity` 包含 environment ID、version 和 protocol version。连接、reset 和每次 apply 都必须校验 session/task/unit 顺序。
 
 模型可见的 `ObservationSignal` 仅包含：
 
@@ -81,10 +76,10 @@ identity。连接、reset 和每次 apply 都必须校验 session/task/unit 顺�
 timestamp_ms
 delta_ms
 mixed_microphone[1920]
-screen[3,224,224]
+video[3,224,224]
 ```
 
-每个 unit 都携带一帧完整屏幕；采集缺帧表示为黑帧，不使用 valid 或 revision 分支。
+每个 unit 携带最新因果视频帧及采集时间/revision，低帧率复用，缺失或失效显式失败。
 
 是否继续 rollout 由 Harness receipt 的 `terminated` 控制字段表示；它不属于模型物理
 输入，也不携带任务成功原因。
@@ -110,28 +105,27 @@ ObservationSignal timeline
 Reward 仍以可审计多分量形式保存：
 
 $$
-R_{\mathrm{interaction}}=0.4R_{\mathrm{speech}}+0.3R_{\mathrm{latency}}+0.3R_{\mathrm{efficiency}}
+R_{\mathrm{interaction}}=0.5R_{\mathrm{speech}}+0.5R_{\mathrm{latency}}
 $$
 
 $$
 R_t=R_{\mathrm{task}}+0.2R_{\mathrm{interaction}}+R_{\mathrm{safety}}
 $$
 
-所有分量都必须由相同的 ObservationSignal 推断；安全执行器是硬约束，不允许 Judge
-正分抵消危险操作。
+所有分量都必须由相同 ObservationSignal 推断。task 衡量对话目标与回答质量，speech
+衡量可懂度、连贯性和轮次，latency 衡量适时响应和停止；safety 衡量对话安全。
 正式 rubric 固定为 `configs/reward/perceptual-v1.yaml`，其内容 SHA-256 与冻结 Judge 的
 model ID/revision 一起写入配置和 checkpoint；`unconfigured` 或 hash 不匹配时拒绝启动。
 
 ## 5. PPO 窗口
 
-当前 serving policy 在固定窗口内连续运行并记录 recurrent state、sampled action、old
+当前 serving policy 在固定窗口内连续运行并记录 recurrent state、sampled speech、old
 log-prob、value 和 policy version。窗口只有在 reward finalization watermark 覆盖可归因
 事件且没有 infrastructure failure 时封存。旧 policy 继续服务，候选 policy 后台训练；
 候选通过验证后在 80 ms unit 边界原子切换。切换只原子替换模型参数和 optimizer
 状态；serving policy 在该边界已经形成的完整 recurrent state（包括 C/H/RecentKV/SlowMemory、audio cache、
-Speech/Action local state 和 unit cursor）原样继承给新参数，不能 reset，也不能用有限观察
-历史反事实重算。有限历史无法恢复早期时间线累积进 C/H/SlowMemory 的长期信息，并可能破坏尚未释放的
-按键或未完成 UTF-8 等执行状态。
+Speech local state 和 unit cursor）原样继承给新参数，不能 reset，也不能用有限观察
+历史反事实重算。有限历史无法恢复早期时间线累积进 C/H/SlowMemory 的长期信息，并破坏跨帧语音连续性。
 
 后台训练不得阻塞物理时间线。reward 等待和 candidate optimizer 运行期间，serving policy
 仍逐 unit 产生输出；这些新增 unit 继续写入 observation hash chain，但窗口必须以
@@ -157,7 +151,7 @@ source 的 JEPA-only lookahead。sealed metadata 记录其 unit index 和 payloa
 lookahead 不进入 PPO unit count、reward、advantage、old/reference log-prob 或 ratio；candidate
 从 window start state 重放到 O_end 后，仅用其 audio cache 副本执行 Perceiver target 编码，
 不推进 C/H/RecentKV/SlowMemory。该 observation 后续仍按正常生命期顺序被 serving policy 消费，不能额外执行
-一次环境 action。
+一次环境交互。
 
 每个 PPO epoch 同时计算两路 JEPA：sealed on-policy 连续 observation 学习当前物理交互，
 SFT replay 连续 episode 稳定通用表示。两路都使用 candidate 内唯一一份 Perceiver 参数，
@@ -183,7 +177,7 @@ $$
 y_t = A_t + V_t
 $$
 
-对 speech unit 和 structured action frame 分别计算 ratio，再等权组合：
+每个 unit 的 speech mode 与有效 codec token 联合形成唯一策略概率，计算一次 ratio：
 
 $$
 \log \pi_{\mathrm{speech},t}
@@ -234,7 +228,7 @@ sampled KL 的 log-ratio 在进入指数前按协议上限截断，以避免极�
 
 - rollout 必须由当前 policy 在线产生，训练不得从静态文件冒充 on-policy 数据；
 - policy update 后未消费的旧 rollout 必须丢弃；
-- 每个 action frame 在当前 unit 解码后由 Harness 验证 schema、权限和危险操作；
+- 每个语音 unit 解码为 PCM，Harness 校验时钟、顺序并在独立有界队列播放；
 - 环境超时、崩溃、身份变化或 receipt 不完整时，该 rollout 标为 infrastructure failure，
   不当作低 reward 样本训练；
 - 环境 socket 和 snapshot 位于仓库外，连接失败必须 fail closed；
@@ -244,7 +238,7 @@ sampled KL 的 log-ratio 在进入指数前按协议上限截断，以避免极�
 
 checkpoint 保存 serving policy/optimizer、policy 与冻结 reference 的完整 recurrent state、
 下一个 observation unit cursor、policy version、active goal tracker、reward watermark、timeline
-chain hash 和冻结 SFT checkpoint 路径/hash。恢复不是重新启动快照：Training System 必须调用
+chain hash 和冻结 SFT checkpoint 路径/hash。恢复不重新创建对话会话：Training System 必须调用
 `resume_lifetime_session(session_id, expected_next_unit)` 连接 Harness 中仍存活的同一 session，
 并要求 Harness 当前 observation、timeline 长度、两个 recurrent state 的 unit cursor 和
 checkpoint chain hash 完全一致。任一对象缺失或错位都拒绝恢复，绝不通过 reset 伪造连续性。

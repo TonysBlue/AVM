@@ -5,16 +5,12 @@ this package boundary, so they cannot accidentally acquire device or reward
 dependencies.
 """
 
-from model.action import ActionHead, action_frame_log_prob, action_log_prob_components
 from model.attention import SlowMemory
 from model.core import FactorizedSpeechHead, StreamingLatentLoop
 from model.encoders import DeltaTimeEncoder
 from model.losses import compute_jepa_loss, compute_losses
 from model.perceiver import JEPAHead, Perceiver
 from model.types import (
-    ActionFrame,
-    ActionHeadOutput,
-    ActionLocalState,
     Episode,
     GenerationOutput,
     LayerKV,
@@ -30,7 +26,7 @@ from model.types import (
 from model.value import ValueHead
 
 __all__ = [
-    "ActionFrame", "ActionHead", "ActionHeadOutput", "ActionLocalState", "Episode",
+    "Episode",
     "FactorizedSpeechHead",
     "Perceiver", "JEPAHead", "SlowMemory",
     "DeltaTimeEncoder",
@@ -38,5 +34,5 @@ __all__ = [
     "SpeechSamplingConfig", "StepOutput", "StreamUnit", "StreamingLatentLoop",
     "TrainingStepOutput", "training_output",
     "ValueHead",
-    "action_frame_log_prob", "action_log_prob_components", "compute_jepa_loss", "compute_losses",
+    "compute_jepa_loss", "compute_losses",
 ]

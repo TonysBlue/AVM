@@ -35,10 +35,6 @@ class ModelConfig:
     speech_depth_layers: int = 2
     speech_depth_heads: int = 4
     speech_depth_ffn_dim: int = 1024
-    action_schema_id: str = "structured-action-v1"
-    action_coordinate_grid_size: int = 32
-    action_type_bytes_per_unit: int = 16
-    action_hotkey_keys_per_unit: int = 8
     dropout: float = 0.1
     activation_checkpointing: bool = False
 
@@ -64,8 +60,9 @@ class DataConfig:
     codec_codebook_size: int = 2048
     unit_ms: int = 80
     unit_audio_samples: int = 1_920
-    screen_height: int = 224
-    screen_width: int = 224
+    video_height: int = 224
+    video_width: int = 224
+    video_max_age_ms: int = 1000
     episode_units: int = 32
     train_episodes: int = 1_000
     seed: int = 17
@@ -89,7 +86,6 @@ class TrainingConfig:
     codec_scheduled_sampling_start: float = 0.7
     backbone_train_mode: str = "all"
     speech_loss_weight: float = 1.0
-    action_loss_weight: float = 1.0
     jepa_loss_weight: float = 1.0
     memory_horizon_units: int = 375
     min_learning_rate_ratio: float = 0.1
@@ -119,8 +115,8 @@ class RLConfig:
     reward_socket: str | None = None
     environment_id: str = ""
     environment_version: str = "1"
-    environment_protocol_version: str = "realtime-v2"
-    reward_spec_id: str = "realtime-v2"
+    environment_protocol_version: str = "avm-realtime-v1"
+    reward_spec_id: str = "avm-dialogue-v1"
     judge_model_id: str = "external-frozen-multimodal"
     judge_revision: str = "unconfigured"
     rubric_sha256: str = "unconfigured"
@@ -138,7 +134,7 @@ class RLConfig:
 @dataclass(slots=True)
 class TrackingConfig:
     enabled: bool = True
-    project: str = "latentloop"
+    project: str = "avm"
     mode: str = "online"
     base_url: str = "http://127.0.0.1:8080"
     media_samples_per_run: int = 4
@@ -208,14 +204,6 @@ class ProjectConfig:
             raise ValueError("delta time Fourier bands must be positive")
         if self.model.delta_time_base_period_ms < 1:
             raise ValueError("delta time base period must be positive")
-        if self.model.action_schema_id != "structured-action-v1":
-            raise ValueError("model.action_schema_id must be structured-action-v1")
-        if self.model.action_coordinate_grid_size != 32:
-            raise ValueError("structured action requires a 32x32 coordinate grid")
-        if self.model.action_type_bytes_per_unit != 16:
-            raise ValueError("structured action requires 16 TYPE bytes per unit")
-        if self.model.action_hotkey_keys_per_unit != 8:
-            raise ValueError("structured action requires at most 8 HOTKEY keys per unit")
         if self.data.dataset not in {
             "synthetic",
             "canary",
@@ -240,8 +228,10 @@ class ProjectConfig:
             or audio_frames % self.model.audio_tokens
         ):
             raise ValueError("audio convolution frames must divide into model audio tokens")
-        if self.data.screen_height != 224 or self.data.screen_width != 224:
-            raise ValueError("screen input must be exactly 224x224")
+        if self.data.video_height != 224 or self.data.video_width != 224:
+            raise ValueError("video input must be exactly 224x224")
+        if self.data.video_max_age_ms < self.data.unit_ms:
+            raise ValueError("video_max_age_ms must cover at least one stream unit")
         if self.data.codec_codebooks != self.model.speech_codebooks:
             raise ValueError("data and model codec codebook counts must match")
         if self.data.codec_codebook_size != self.model.speech_codebook_size:
@@ -322,8 +312,8 @@ class ProjectConfig:
                 == Path(rl.sft_preservation_manifest).expanduser()
             ):
                 raise ValueError("PPO replay and preservation datasets must be independent")
-        if self.training.speech_loss_weight <= 0 or self.training.action_loss_weight <= 0:
-            raise ValueError("speech_loss_weight and action_loss_weight must be positive")
+        if self.training.speech_loss_weight <= 0:
+            raise ValueError("speech_loss_weight must be positive")
         expected_jepa_weight = 0.5 if self.training.stage == "sft" else 1.0
         if self.training.stage != "rl" and self.training.jepa_loss_weight != expected_jepa_weight:
             raise ValueError(

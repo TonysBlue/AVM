@@ -33,14 +33,6 @@ def test_webdataset_episode_round_trip(tmp_path: Path, smoke_config: ProjectConf
     assert torch.equal(decoded.units[0].speech_codes, original.units[0].speech_codes)
     assert torch.equal(decoded.target_speech, original.target_speech)
     assert torch.equal(decoded.units[0].speech_mode, original.units[0].speech_mode)
-    for name, expected in original.units[-1].action.items():
-        actual = dict(decoded.units[-1].action.items())[name]
-        assert torch.equal(actual, expected)
-    assert torch.equal(
-        decoded.units[-1].action_supervision_mask,
-        original.units[-1].action_supervision_mask,
-    )
-    assert torch.allclose(decoded.units[0].mic_audio, original.units[0].mic_audio, atol=5e-5)
 
 
 def test_validation_rejects_non_monotonic_timestamps(smoke_config: ProjectConfig) -> None:
@@ -94,7 +86,7 @@ def test_reader_rejects_manifest_content_mismatch(
 
 def test_reader_rejects_incomplete_metadata(tmp_path: Path, smoke_config: ProjectConfig) -> None:
     episode = SyntheticEpisodeDataset(smoke_config.data, smoke_config.model).make_episode(0)
-    episode.metadata.pop("action_schema_id")
+    episode.metadata.pop("task_id")
     write_episode_shards([episode], tmp_path / "train-%06d.tar", max_size=10_000_000)
     reader = EpisodeShardReader(
         str(tmp_path / "train-*.tar"), smoke_config.data, smoke_config.model

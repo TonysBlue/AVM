@@ -88,14 +88,11 @@ def sampled_reference_kl(
 def recurrent_ppo_loss(
     current_speech_logprob: Tensor,
     old_speech_logprob: Tensor,
-    current_action_logprob: Tensor,
-    old_action_logprob: Tensor,
     advantage: Tensor,
     current_value: Tensor,
     old_value: Tensor,
     value_target: Tensor,
     reference_speech_logprob: Tensor,
-    reference_action_logprob: Tensor,
     *,
     clip_epsilon: float,
     value_coef: float,
@@ -106,15 +103,9 @@ def recurrent_ppo_loss(
     speech = clipped_policy_loss(
         current_speech_logprob, old_speech_logprob, advantage, clip_epsilon
     )
-    action = clipped_policy_loss(
-        current_action_logprob, old_action_logprob, advantage, clip_epsilon
-    )
-    actor = 0.5 * (speech + action)
+    actor = speech
     value = clipped_value_loss(current_value, old_value, value_target, clip_epsilon)
-    reference_kl = 0.5 * (
-        sampled_reference_kl(current_speech_logprob, reference_speech_logprob)
-        + sampled_reference_kl(current_action_logprob, reference_action_logprob)
-    )
+    reference_kl = sampled_reference_kl(current_speech_logprob, reference_speech_logprob)
     entropy_value = entropy.mean() if entropy is not None else torch.zeros_like(actor)
     total = (
         actor
@@ -125,7 +116,6 @@ def recurrent_ppo_loss(
     return total, {
         "actor": actor,
         "speech_actor": speech,
-        "action_actor": action,
         "value": value,
         "reference_kl": reference_kl,
         "entropy": entropy_value,

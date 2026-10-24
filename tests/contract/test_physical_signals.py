@@ -7,17 +7,12 @@ import pytest
 sys.path.insert(0, "packages/contracts/src")
 
 from contracts import (  # noqa: E402
-    ActionFrame,
-    ActionKind,
     ActuationSignal,
-    ButtonPhase,
-    ControlKind,
-    ControlSignal,
     EnvironmentReceipt,
     MicSignal,
     ObservationSignal,
-    ScreenSignal,
     SpeechSignal,
+    VideoSignal,
     payload_to_receipt,
     receipt_to_payload,
 )
@@ -27,9 +22,7 @@ from contracts.protocol import (  # noqa: E402
     message_to_observation,
     observation_to_message,
 )
-from contracts.realtime_pb2 import ControlSignal as ControlMessage  # noqa: E402
-from contracts.realtime_pb2 import ScreenFrame as ScreenMessage  # noqa: E402
-from runtime.action import ActionFrameDecoder
+from contracts.realtime_pb2 import VideoFrame as VideoMessage  # noqa: E402
 
 
 def test_observation_physical_signal_round_trip() -> None:
@@ -39,16 +32,15 @@ def test_observation_physical_signal_round_trip() -> None:
         0,
         80,
         MicSignal(b"x" * 7680),
-        ScreenSignal(b"rgb", 1, 1),
+        VideoSignal(b"rgb", 1, 1, captured_at_ms=0, revision=0),
     )
     restored = message_to_observation(observation_to_message(value))
     assert restored == value
 
 
-def test_realtime_v2_has_no_screen_revision_or_valid_fields() -> None:
-    assert "revision" not in ScreenMessage.DESCRIPTOR.fields_by_name
-    assert "valid" not in ScreenMessage.DESCRIPTOR.fields_by_name
-    assert "screen_revision" not in ControlMessage.DESCRIPTOR.fields_by_name
+def test_avm_video_has_capture_time_and_revision() -> None:
+    assert "revision" in VideoMessage.DESCRIPTOR.fields_by_name
+    assert "captured_at_ms" in VideoMessage.DESCRIPTOR.fields_by_name
 
 
 def test_actuation_does_not_contain_raw_action_tokens() -> None:
@@ -56,17 +48,10 @@ def test_actuation_does_not_contain_raw_action_tokens() -> None:
         "session",
         0,
         SpeechSignal(b"x" * 7680, silent=True),
-        (
-            ControlSignal(
-                ControlKind.POINTER_BUTTON,
-                "event",
-                button=0,
-                button_phase=ButtonPhase.CLICK,
-            ),
-        ),
     )
     restored = message_to_actuation(actuation_to_message(value))
     assert restored == value
+    assert not hasattr(restored, "controls")
     assert not hasattr(restored, "action_tokens")
 
 
@@ -78,9 +63,3 @@ def test_physical_signal_rejects_wrong_audio_clock() -> None:
 def test_receipt_protobuf_round_trip() -> None:
     receipt = EnvironmentReceipt("session", 3, True, execution_latency_ms=1.5, terminated=True)
     assert payload_to_receipt(receipt_to_payload(receipt)) == receipt
-
-
-def test_action_frame_is_executed_in_its_unit() -> None:
-    decoder = ActionFrameDecoder()
-    controls = decoder.push(ActionFrame(ActionKind.TYPE, text_bytes=b"ok"), event_id="event")
-    assert [control.text for control in controls] == ["ok"]

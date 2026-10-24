@@ -52,7 +52,6 @@ def test_local_dev_and_canary_profiles_are_explicit() -> None:
     canary = load_config("configs/canary.yaml")
     assert local.data.dataset == "synthetic"
     assert canary.data.dataset == "canary"
-    assert canary.model.action_schema_id == "structured-action-v1"
 
 
 def test_canary_gpu_smoke_is_model_and_horizon_identical_to_canary() -> None:
@@ -74,7 +73,7 @@ def test_canary_gpu_smoke_is_model_and_horizon_identical_to_canary() -> None:
     assert gpu_smoke.model.num_layers == 8
     assert gpu_smoke.model.num_heads == 8
     assert gpu_smoke.model.ffn_dim == 768
-    assert StreamingLatentLoop(gpu_smoke.model).parameter_count() == 11_298_250
+    assert StreamingLatentLoop(gpu_smoke.model).parameter_count() == 10_170_811
 
 
 def test_fast_smoke_is_explicitly_not_the_canary_capacity_profile() -> None:
@@ -113,7 +112,7 @@ def test_formal_rl_requires_real_environment_configuration() -> None:
 
 def test_formal_rl_environment_identity_matches_harness_service() -> None:
     training = load_config("configs/canary.yaml")
-    assert training.training.rl.environment_id == "isolated-qemu-v1"
+    assert training.training.rl.environment_id == "avm-dialogue"
 
 
 def test_ppo_candidate_acceptance_gates_are_validated() -> None:

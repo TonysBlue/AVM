@@ -8,8 +8,7 @@ from typing import Any
 import numpy as np
 import soundfile as sf
 import torch
-from contracts import ACTION_SCHEMA_ID, ActionKind, PointerButton, PointerButtonPhase
-from model.types import ActionFrame, Episode, SpeechMode, StreamUnit
+from model.types import Episode, SpeechMode, StreamUnit
 from runtime.config import DataConfig, ModelConfig
 
 
@@ -63,7 +62,7 @@ def _segment_activity(segments: list[dict[str, Any]], ticks: int, frame_samples:
     return active
 
 
-def _load_screens(
+def _load_videos(
     path: str | None, model: ModelConfig, data: DataConfig
 ) -> dict[int, torch.Tensor]:
     if path is None:
@@ -75,14 +74,14 @@ def _load_screens(
     finally:
         loaded.close()
     if len(ticks) != len(frames):
-        raise ValueError("screen ticks and frames must have identical lengths")
-    expected = (3, data.screen_height, data.screen_width)
+        raise ValueError("video ticks and frames must have identical lengths")
+    expected = (3, data.video_height, data.video_width)
     result: dict[int, torch.Tensor] = {}
     for tick, frame in zip(ticks.tolist(), frames, strict=True):
         if tuple(frame.shape) != expected:
-            raise ValueError(f"screen frame must have shape {expected}")
+            raise ValueError(f"video frame must have shape {expected}")
         if int(tick) in result:
-            raise ValueError("screen tick is duplicated")
+            raise ValueError("video tick is duplicated")
         result[int(tick)] = torch.from_numpy(frame.copy()).float()
     return result
 
@@ -155,15 +154,19 @@ def _build_episode(
         if explicit_segments is not None
         else _speech_activity(target, data.unit_audio_samples)
     )
-    screen_path = record.get("screens")
-    screens = _load_screens(str(_resolve(base, screen_path)) if screen_path else None, model, data)
-    if any(tick < 0 or tick >= ticks for tick in screens):
-        raise ValueError("screen tick is outside the episode timeline")
-    action_by_tick = _load_action_targets(record.get("actions"), ticks)
+    video_path = record.get("videos")
+    videos = _load_videos(str(_resolve(base, video_path)) if video_path else None, model, data)
+    if any(tick < 0 or tick >= ticks for tick in videos):
+        raise ValueError("video tick is outside the episode timeline")
     units: list[StreamUnit] = []
-    empty_screen = torch.zeros(3, data.screen_height, data.screen_width)
+    if any(key == "actions" or key.startswith("action_") for key in record):
+        raise ValueError("legacy action labels are not supported by AVM")
+    if 0 not in videos:
+        raise ValueError("AVM episode requires an initial video frame")
+    current_video = videos[0]
     for tick in range(ticks):
         speaking = active[tick]
+        current_video = videos.get(tick, current_video)
         units.append(
             StreamUnit(
                 timestamp_ms=torch.tensor([tick * data.unit_ms]),
@@ -171,7 +174,7 @@ def _build_episode(
                 mic_audio=mic[
                     None, tick * data.unit_audio_samples : (tick + 1) * data.unit_audio_samples
                 ],
-                screen=screens.get(tick, empty_screen)[None],
+                video=current_video[None],
                 speech_mode=torch.tensor(
                     [int(SpeechMode.SPEECH if speaking else SpeechMode.SILENCE)]
                 ),
@@ -182,8 +185,6 @@ def _build_episode(
                 speech_codec_mask=torch.full(
                     (1, model.speech_frames_per_unit), speaking, dtype=torch.bool
                 ),
-                action=action_by_tick[tick][0],
-                action_supervision_mask=action_by_tick[tick][1],
             )
         )
     metadata = {
@@ -199,15 +200,14 @@ def _build_episode(
         "device_id_hash": record.get("device_id_hash", "speech-import"),
         "turns": record.get("turns", []),
         "stage": record.get("stage", "pretrain"),
+        "schema_id": "avm-episode-v1",
         "dataset_scale": data.dataset,
         "sample_kind": record.get("sample_kind", "supervised_episode"),
         "supervision_kind": record.get("supervision_kind", "speech"),
-        "action_source": "expert" if record.get("actions") else "none",
         "task_id": record.get("task_id", record["episode_id"]),
         "environment_id": record.get("environment_id", "recorded"),
         "environment_version": record.get("environment_version", "1"),
-        "protocol_version": record.get("protocol_version", "realtime-v2"),
-        "action_schema_id": ACTION_SCHEMA_ID,
+        "protocol_version": record.get("protocol_version", "avm-realtime-v1"),
     }
     episode = Episode(str(record["episode_id"]), units, metadata, target_speech=target)
     episode.validate(
@@ -217,71 +217,3 @@ def _build_episode(
         speech_codebook_size=model.speech_codebook_size,
     )
     return episode
-
-
-def _load_action_targets(values: Any, ticks: int) -> list[tuple[ActionFrame, torch.Tensor]]:
-    result = [
-        (ActionFrame.no_action(1), torch.zeros(1, dtype=torch.bool))
-        for _ in range(ticks)
-    ]
-    if values is None:
-        return result
-    if not isinstance(values, list):
-        raise ValueError("actions must be a list")
-    for index, raw in enumerate(values):
-        if not isinstance(raw, dict):
-            raise ValueError(f"actions[{index}] must be an object")
-        tick = int(raw["tick"])
-        if tick < 0 or tick >= ticks:
-            raise ValueError("action tick is outside the episode timeline")
-        if bool(result[tick][1].any()):
-            raise ValueError("action tick is duplicated")
-        try:
-            kind = ActionKind[str(raw["kind"]).upper()]
-        except (KeyError, TypeError) as error:
-            raise ValueError(f"actions[{index}] has an invalid kind") from error
-        frame = ActionFrame.no_action(1)
-        frame.kind[0] = int(kind)
-        if kind is ActionKind.POINTER_MOVE:
-            coordinate = raw.get("coordinate")
-            if not isinstance(coordinate, list) or len(coordinate) != 2:
-                raise ValueError("POINTER_MOVE requires coordinate [x, y]")
-            x, y = (float(value) for value in coordinate)
-            if not 0 <= x <= 1 or not 0 <= y <= 1:
-                raise ValueError("POINTER_MOVE coordinate must be in [0, 1]")
-            cell_x, cell_y = min(int(x * 32), 31), min(int(y * 32), 31)
-            frame.coordinate_cell[0] = cell_y * 32 + cell_x
-            frame.coordinate_residual[0] = torch.tensor((x * 32 - cell_x, y * 32 - cell_y))
-        elif kind is ActionKind.POINTER_BUTTON:
-            try:
-                frame.button[0] = int(PointerButton[str(raw["button"]).upper()])
-                frame.button_phase[0] = int(PointerButtonPhase[str(raw["phase"]).upper()])
-            except (KeyError, TypeError) as error:
-                raise ValueError("POINTER_BUTTON requires valid button and phase") from error
-        elif kind is ActionKind.SCROLL:
-            delta = raw.get("scroll_delta")
-            if not isinstance(delta, list) or len(delta) != 2:
-                raise ValueError("SCROLL requires scroll_delta [dx, dy]")
-            frame.scroll_delta[0] = torch.tensor(tuple(float(value) for value in delta))
-        elif kind is ActionKind.TYPE:
-            if "text_bytes" in raw:
-                text = bytes(int(value) for value in raw["text_bytes"])
-            elif isinstance(raw.get("text"), str):
-                text = raw["text"].encode("utf-8")
-            else:
-                raise ValueError("TYPE requires text or text_bytes")
-            if not 1 <= len(text) <= frame.text_bytes.shape[1]:
-                raise ValueError("TYPE chunk must contain 1..16 bytes")
-            frame.text_bytes[0, : len(text)] = torch.tensor(tuple(text))
-            frame.text_length[0] = len(text)
-        elif kind is ActionKind.HOTKEY:
-            keys = raw.get("keys")
-            if not isinstance(keys, list) or not keys:
-                raise ValueError("HOTKEY requires a non-empty keys list")
-            if len(keys) > frame.hotkey_keys.shape[1]:
-                raise ValueError("HOTKEY exceeds eight keys")
-            frame.hotkey_keys[0, : len(keys)] = torch.tensor(keys)
-            frame.hotkey_length[0] = len(keys)
-        frame.validate()
-        result[tick] = (frame, torch.ones(1, dtype=torch.bool))
-    return result
