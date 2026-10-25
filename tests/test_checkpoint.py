@@ -12,9 +12,33 @@ from training.checkpoint import (
     CheckpointManager,
     CheckpointMetadata,
     DataCursor,
+    capture_rng_state,
     file_sha256,
 )
 from training.training import initialize_exact_weights
+
+
+def test_checkpoint_preserves_rng_snapshot_while_actor_advances(tmp_path: Path) -> None:
+    model = torch.nn.Linear(2, 2)
+    optimizer = torch.optim.AdamW(model.parameters())
+    snapshot = capture_rng_state()
+    torch.rand(19)
+    path, _ = CheckpointManager(tmp_path).save(
+        "boundary",
+        model=model,
+        optimizer=optimizer,
+        scheduler=None,
+        scaler=None,
+        recurrent_state=None,
+        train_state={"update": 1},
+        rng_state=snapshot,
+        data_cursor=DataCursor(unit=7),
+        metadata=CheckpointMetadata("data", "codec", "hash", "test"),
+        config={},
+    )
+    payload = torch.load(path, weights_only=False)
+    assert torch.equal(payload["rng"]["torch"], snapshot["torch"])
+    assert not torch.equal(payload["rng"]["torch"], torch.get_rng_state())
 
 
 def test_checkpoint_rejects_time_conditioned_model_schema() -> None:

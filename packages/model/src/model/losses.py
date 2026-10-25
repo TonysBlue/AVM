@@ -6,7 +6,8 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 
-from model.types import SpeechMode, StepOutput, StreamUnit, TrainingStepOutput
+from model.acoustic_policy import acoustic_token_loss
+from model.types import StepOutput, StreamUnit, TrainingStepOutput
 
 
 def _masked_mean(values: Tensor, mask: Tensor) -> Tensor:
@@ -56,22 +57,13 @@ def compute_losses(
     target: StreamUnit,
     speech_loss_weight: float = 1.0,
 ) -> dict[str, Tensor]:
-    mode_values = F.cross_entropy(output.speech_mode_logits, target.speech_mode, reduction="none")
-    mode_loss = _masked_mean(mode_values, target.speech_mode_mask)
-    batch, frames, codebooks, vocab = output.speech_codec_logits.shape
-    codec_values = F.cross_entropy(
-        output.speech_codec_logits.reshape(batch * frames * codebooks, vocab),
-        target.speech_codes.reshape(-1),
-        reduction="none",
-    ).view(batch, frames, codebooks)
-    codec_mask = (
-        target.speech_codec_mask & target.speech_mode.eq(int(SpeechMode.SPEECH))[:, None]
-    )[:, :, None].expand_as(codec_values)
-    codec_loss = _masked_mean(codec_values, codec_mask)
-    total = speech_loss_weight * (mode_loss + codec_loss)
+    logits = output.speech_codec_logits.squeeze(-2)
+    codec_loss = acoustic_token_loss(logits, target.speech_codes.squeeze(-1),
+                                     target.speech_codec_mask,
+                                     forbidden_tokens=(logits.shape[-1] - 1,))
+    total = speech_loss_weight * codec_loss
     return {
         "total": total,
-        "speech": mode_loss + codec_loss,
-        "speech_mode": mode_loss,
+        "speech": codec_loss,
         "speech_codec": codec_loss,
     }

@@ -6,7 +6,7 @@ dependencies.
 """
 
 from model.attention import SlowMemory
-from model.core import FactorizedSpeechHead, StreamingLatentLoop
+from model.core import NativeSpeechHead, StreamingLatentLoop
 from model.losses import compute_jepa_loss, compute_losses
 from model.perceiver import JEPAHead, Perceiver
 from model.types import (
@@ -16,7 +16,6 @@ from model.types import (
     LayerKV,
     RecurrentState,
     SpeechLocalState,
-    SpeechMode,
     SpeechSamplingConfig,
     StepOutput,
     StreamUnit,
@@ -27,10 +26,10 @@ from model.value import ValueHead
 
 __all__ = [
     "Episode",
-    "FactorizedSpeechHead",
+    "NativeSpeechHead",
     "Perceiver", "JEPAHead", "SlowMemory",
     "AudioVideoInput",
-    "GenerationOutput", "LayerKV", "RecurrentState", "SpeechLocalState", "SpeechMode",
+    "GenerationOutput", "LayerKV", "RecurrentState", "SpeechLocalState",
     "SpeechSamplingConfig", "StepOutput", "StreamUnit", "StreamingLatentLoop",
     "TrainingStepOutput", "training_output",
     "ValueHead",

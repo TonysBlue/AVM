@@ -6,7 +6,6 @@ from pathlib import Path
 import torch
 from data import EpisodeShardReader, SyntheticEpisodeDataset
 from model import StreamingLatentLoop
-from model.types import SpeechMode
 from runtime.config import ProjectConfig
 
 from training.checkpoint import file_sha256
@@ -16,10 +15,9 @@ from training.checkpoint import file_sha256
 class Evaluation:
     split: str
     episodes: int
-    speech_mode_accuracy: float
     speech_codec_accuracy: list[float]
-    speech_silence_precision: float
-    speech_silence_recall: float
+    speech_frames: int
+    supervision_density: float
     passed: bool | None = None
 
 
@@ -52,14 +50,19 @@ def load_evaluation_model(
     *,
     require_data_identity: bool = True,
 ) -> StreamingLatentLoop:
-    payload = torch.load(Path(checkpoint).expanduser(), map_location="cpu", weights_only=False)
+    payload = torch.load(Path(checkpoint).expanduser(), map_location="cpu", weights_only=False,
+                         mmap=True)
     if not isinstance(payload.get("model"), dict) or not isinstance(
         payload.get("metadata"), dict
     ):
         raise ValueError("evaluation requires a complete current checkpoint")
     metadata = payload.get("metadata", {})
+    from runtime.native_assets import validate_native_checkpoint_identity
+
+    validate_native_checkpoint_identity(
+        metadata, config.model.native_source_lock, config.model.native_qualification)
     for field, expected in (
-        ("model_schema_id", "avm-model-v2"),
+        ("model_schema_id", "avm-model-v3"),
         ("codec_id", config.data.codec_id),
         ("codec_weight_hash", config.data.codec_weight_hash),
         ("codec_revision", config.data.codec_revision),
@@ -72,9 +75,10 @@ def load_evaluation_model(
             manifest = config.runtime.data_path() / manifest
         if manifest.is_file() and metadata.get("data_identity") != file_sha256(manifest):
             raise ValueError("checkpoint data identity does not match the evaluation manifest")
-    model = StreamingLatentLoop(config.model)
-    model.load_state_dict(payload["model"])
-    dtype = torch.float16 if device.type == "cuda" else torch.float32
+    model = StreamingLatentLoop(config.model, load_native=False)
+    model.load_state_dict(payload["model"], strict=True, assign=True)
+    dtype = (torch.bfloat16 if config.training.mixed_precision == "bf16" else torch.float16
+             ) if device.type == "cuda" else torch.float32
     return model.to(device=device, dtype=dtype).eval()
 
 
@@ -96,10 +100,9 @@ def evaluate_checkpoint(
         if not config.data.shards:
             raise ValueError("evaluation requires WebDataset shards")
         episodes_source = EpisodeShardReader(config.data.shards, config.data, config.model)
-    mode_correct = mode_total = 0
     codec_correct = torch.zeros(config.model.speech_codebooks, dtype=torch.long)
     codec_total = 0
-    silence_tp = silence_pred = silence_target = 0
+    total_frames = 0
     episodes = 0
     with torch.inference_mode():
         for episode in episodes_source:
@@ -110,45 +113,28 @@ def evaluate_checkpoint(
                 output = model(
                     unit.observation,
                     state,
-                    unit.speech_codes,
-                    speech_teacher_mode=unit.speech_mode,
+                    unit.speech_codes if unit.speech_codec_mask.all() else None,
                 )
                 state = output.state
-                mode = output.speech_mode_logits.argmax(-1)
-                mode_mask = unit.speech_mode_mask
-                mode_correct += int(((mode == unit.speech_mode) & mode_mask).sum())
-                mode_total += int(mode_mask.sum())
-                target_codec = (
-                    unit.speech_codec_mask & unit.speech_mode.eq(int(SpeechMode.SPEECH))[:, None]
-                )
-                predicted_codec = output.speech_codec_logits.argmax(-1)
+                target_codec = unit.speech_codec_mask
+                predicted_codec = output.speech_codec_logits[..., :-1].argmax(-1)
                 codec_correct += (
                     ((predicted_codec == unit.speech_codes) & target_codec[:, :, None])
                     .sum(dim=(0, 1))
                     .cpu()
                 )
                 codec_total += int(target_codec.sum())
-                silence_target += int((unit.speech_mode == int(SpeechMode.SILENCE)).sum())
-                silence_pred += int((mode == int(SpeechMode.SILENCE)).sum())
-                silence_tp += int(
-                    (
-                        (mode == int(SpeechMode.SILENCE))
-                        & (unit.speech_mode == int(SpeechMode.SILENCE))
-                    ).sum()
-                )
+                total_frames += target_codec.numel()
     if episodes == 0:
         raise ValueError("evaluation dataset contains no episodes")
-    silence_precision = silence_tp / max(silence_pred, 1)
-    silence_recall = silence_tp / max(silence_target, 1)
     codec_accuracy = (codec_correct.float() / max(codec_total, 1)).tolist()
     passed = min(codec_accuracy, default=0.0) >= codec_threshold
     return Evaluation(
         split,
         episodes,
-        mode_correct / max(mode_total, 1),
         codec_accuracy,
-        silence_precision,
-        silence_recall,
+        codec_total,
+        codec_total / max(total_frames, 1),
         passed,
     )
 
@@ -161,7 +147,7 @@ def evaluate_overfit_checkpoint(
     codec_threshold: float = 0.9,
     control_f1_threshold: float | None = None,
 ) -> Evaluation:
-    """Evaluate the direct-speech gate through the same two-head protocol."""
+    """Evaluate the direct-speech gate through the shared acoustic protocol."""
     return evaluate_checkpoint(
         config,
         checkpoint,

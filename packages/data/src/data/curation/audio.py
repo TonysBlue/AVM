@@ -6,8 +6,8 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-SAMPLE_RATE = 24_000
-FRAME_SAMPLES = 1_920
+SAMPLE_RATE = 16_000
+FRAME_SAMPLES = 3_200
 
 
 def write_flac(path: Path, waveform: np.ndarray, sample_rate: int = SAMPLE_RATE) -> None:

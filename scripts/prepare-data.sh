@@ -9,6 +9,7 @@ ACTION="${2:-all}"
 CFG="${DATA_CONFIG:-$REPO/configs/${DATASET}.yaml}"
 RUN_DIR="${LATENTLOOP_RUNTIME_ROOT:-$STORAGE_ROOT/runtime}/sockets"
 LOCK="${LATENTLOOP_SOURCE_LOCK:-$ROOT/registry/source-lock.json}"
+NATIVE_LOCK="${AVM_NATIVE_SOURCE_LOCK:-$STORAGE_ROOT/models/minicpm-o-4_5/eb4141de24550a3a1a4082f718be58f46b761728/source-lock.json}"
 VOICES="${LATENTLOOP_VOICE_LIBRARY:-$ROOT/registry/voices/voice-library.json}"
 TTS_HASH="b144ef55b51ce8cfb79a73c90dbba0bdaba4e451c0ebcfab20f769264f84a608"
 NORMALIZER="uv run --project $REPO/tools/curation python $REPO/tools/curation/normalize_adapter.py"
@@ -30,7 +31,6 @@ prepare() {
   }
   "$REPO/scripts/bootstrap-canary.sh"
   "$REPO/scripts/bootstrap-canary-models.sh"
-  "$REPO/scripts/canary-mimi-worker.sh" stop
   "$REPO/scripts/canary-speech-workers.sh" start
   trap '"$REPO/scripts/canary-speech-workers.sh" stop' EXIT
   uv run data prepare-canary-data \
@@ -43,19 +43,16 @@ prepare() {
 }
 
 encode() {
-  "$REPO/scripts/download-mimi.sh"
-  "$REPO/scripts/bootstrap-codec.sh"
+  [[ -f "$NATIVE_LOCK" ]] || {
+    printf 'locked MiniCPM-o 4.5 assets are absent: %s\n' "$NATIVE_LOCK" >&2
+    exit 2
+  }
+  uv sync --project "$REPO/tools/native-speech" --locked
   "$REPO/scripts/canary-speech-workers.sh" stop
-  "$REPO/scripts/canary-mimi-worker.sh" start
-  trap '"$REPO/scripts/canary-mimi-worker.sh" stop' EXIT
-  uv run data benchmark-codec \
-    --config "$CFG" --socket "$RUN_DIR/mimi.sock" \
-    --report "$ROOT/$DATASET/reports/codec-benchmark.json"
+  uv run data inspect-native-assets --source-lock "$NATIVE_LOCK"
   uv run python "$REPO/tools/curation/finalize_data.py" \
-    --config "$CFG" --root "$ROOT" --socket "$RUN_DIR/mimi.sock"
+    --config "$CFG" --root "$ROOT" --native-source-lock "$NATIVE_LOCK"
   uv run data check-readiness --config "$CFG" --root "$ROOT"
-  "$REPO/scripts/canary-mimi-worker.sh" stop
-  trap - EXIT
 }
 
 case "$ACTION" in

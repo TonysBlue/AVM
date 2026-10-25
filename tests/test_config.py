@@ -12,16 +12,25 @@ def test_load_config_with_override() -> None:
     assert config.model.semantic_memory_slots == 6
     assert config.model.tokens_per_unit == config.model.perceiver_slots == 16
     assert config.model.perceiver_layers == config.model.jepa_layers == 2
-    assert config.data.unit_ms == 80
-    assert config.data.codec_frame_rate == 12.5
+    assert config.data.unit_ms == 200
+    assert config.data.codec_frame_rate == 25
     assert not any(name.startswith("delta_time") for name in asdict(config.model))
+
+
+def test_logical_clock_is_restricted_to_synthetic_protocol_fixtures() -> None:
+    assert load_config("configs/smoke.yaml").runtime.clock_kind == "logical_fixture"
+    assert load_config("configs/canary.yaml").runtime.clock_kind == "monotonic"
+    with pytest.raises(ValueError, match="logical fixture clocks"):
+        load_config("configs/canary.yaml", ["runtime.clock_kind=logical_fixture"])
+    with pytest.raises(ValueError, match="logical fixture clocks"):
+        load_config("configs/smoke.yaml", ["data.codec_id=minicpm-o-4_5-s3-25hz"])
 
 
 def test_world_state_configuration_is_bounded() -> None:
     config = load_config("configs/smoke.yaml")
     assert config.model.slow_memory_type == "gated_delta"
-    with pytest.raises(ValueError, match="16 slots"):
-        load_config("configs/smoke.yaml", ["model.perceiver_slots=8"])
+    with pytest.raises(ValueError, match="64 work slots"):
+        load_config("configs/canary.yaml", ["model.perceiver_slots=8"])
 
 
 def test_stage_jepa_weights_are_fixed() -> None:
@@ -58,17 +67,17 @@ def test_canary_gpu_smoke_is_model_and_horizon_identical_to_canary() -> None:
     assert gpu_smoke.training.max_updates == 1
     assert gpu_smoke.training.gradient_accumulation_steps == 1
     assert gpu_smoke.runtime.require_cuda
-    assert gpu_smoke.model.kv_units == 375
+    assert gpu_smoke.model.kv_units == 150
     assert gpu_smoke.model.kv_window_ms == 30_000
-    assert gpu_smoke.data.episode_units == 375
-    assert gpu_smoke.training.tbptt_units == 375
-    assert gpu_smoke.training.memory_horizon_units == 375
-    assert gpu_smoke.training.rl.ppo_window_units == 375
-    assert gpu_smoke.model.model_dim == 192
-    assert gpu_smoke.model.num_layers == 8
-    assert gpu_smoke.model.num_heads == 8
-    assert gpu_smoke.model.ffn_dim == 768
-    assert StreamingLatentLoop(gpu_smoke.model).parameter_count() == 10_170_811
+    assert gpu_smoke.data.episode_units == 150
+    assert gpu_smoke.training.tbptt_units == 150
+    assert gpu_smoke.training.memory_horizon_units == 150
+    assert gpu_smoke.training.rl.ppo_window_units == 150
+    assert gpu_smoke.model.model_dim == 4096
+    assert gpu_smoke.model.num_layers == 36
+    assert gpu_smoke.model.num_heads == 32
+    assert gpu_smoke.model.ffn_dim == 12288
+    assert StreamingLatentLoop(gpu_smoke.model, load_native=False).parameter_count() > 8_000_000_000
 
 
 def test_fast_smoke_is_explicitly_not_the_canary_capacity_profile() -> None:
@@ -93,7 +102,7 @@ def test_training_stage_is_the_only_top_level_dispatch_key() -> None:
 
 
 def test_formal_rl_requires_real_environment_configuration() -> None:
-    with pytest.raises(ValueError, match="environment, codec and reward sockets"):
+    with pytest.raises(ValueError, match="environment and reward sockets"):
         load_config(
             "configs/canary.yaml",
             ["training.stage=rl", "training.rl.environment_socket=null"],
@@ -170,8 +179,8 @@ def test_config_rejects_incompatible_attention_width() -> None:
         load_config("configs/smoke.yaml", ["model.model_dim=63"])
 
 
-def test_direct_speech_requires_one_codec_frame_per_tick() -> None:
-    with pytest.raises(ValueError, match="exactly one speech frame"):
+def test_direct_speech_requires_five_codec_frames_per_tick() -> None:
+    with pytest.raises(ValueError, match="exactly five tokens"):
         load_config("configs/smoke.yaml", ["model.speech_frames_per_unit=2"])
 
 

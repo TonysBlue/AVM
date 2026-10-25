@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import torch
-from model.types import Episode, SpeechMode, StreamUnit
+from model.types import Episode, StreamUnit
 from runtime.codec import codec_frame_mask
 from runtime.config import DataConfig, ModelConfig
 
@@ -45,14 +45,14 @@ class SyntheticEpisodeDataset:
                 "codec_weight_hash": self.data.codec_weight_hash,
                 "codec_revision": self.data.codec_revision,
                 "stage": "pretrain",
-                "schema_id": "avm-episode-v1",
+                "schema_id": "avm-episode-v2",
                 "dataset_scale": self.data.dataset,
                 "sample_kind": "supervised_episode",
                 "supervision_kind": "speech",
                 "task_id": f"synthetic-task-{scenario}",
                 "environment_id": "synthetic-test-only",
                 "environment_version": "1",
-                "protocol_version": "avm-realtime-v1",
+                "protocol_version": "avm-realtime-v2",
             },
             target_speech=torch.zeros(self.data.episode_units * self.data.unit_audio_samples),
             sample_index_in_shard=episode_index,
@@ -95,14 +95,12 @@ class SyntheticEpisodeDataset:
                 + unit_index * 3
                 + torch.arange(self.model.speech_frames_per_unit)
                 + codebook
-            ) % self.model.speech_codebook_size
+            ) % (self.model.speech_codebook_size - 1)
         return StreamUnit(
             timestamp_ms=torch.tensor([unit_index * self.data.unit_ms]),
             delta_ms=torch.tensor([self.data.unit_ms]),
             mic_audio=audio[None],
             video=video[None],
-            speech_mode=torch.tensor([int(SpeechMode.SPEECH)]),
-            speech_mode_mask=torch.ones(1, dtype=torch.bool),
             speech_codes=codes[None],
             speech_codec_mask=codec_frame_mask(
                 unit_index * self.data.unit_ms,

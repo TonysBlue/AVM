@@ -1,10 +1,16 @@
 defaults:
-  - ../smoke
-  - _self_
+- ../smoke
+- _self_
 data:
-  audio_sample_rate: 24000
-  unit_audio_samples: 1920
+  audio_sample_rate: 16000
+  unit_audio_samples: 3200
   train_episodes: 1
+  unit_ms: 200
+  codec_frame_rate: 25.0
+  codec_codebooks: 1
+  codec_codebook_size: 32
+  video_height: 224
+  video_width: 224
 training:
   stage: sft
   jepa_loss_weight: 0.5

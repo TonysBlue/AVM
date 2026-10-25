@@ -20,7 +20,7 @@ def converse(
 ) -> dict[str, Any]:
     if max_units is not None and max_units < 1:
         raise ValueError("max_units must be positive")
-    if model.identity().get("protocol_version") != "avm-realtime-v1":
+    if model.identity().get("protocol_version") != "avm-realtime-v2":
         raise ValueError("model service does not implement the AVM protocol")
     units = 0
     inference_ms = 0.0
@@ -39,6 +39,7 @@ def converse(
             units += 1
             if receipt.terminated:
                 break
+        harness.flush_speech(session_id, model.finish_session(session_id))
     finally:
         try:
             harness.close(session_id)

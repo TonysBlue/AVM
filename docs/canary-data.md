@@ -50,7 +50,7 @@ uv run data audit-canary-data --config "$CFG" --root "$ROOT" --fixture
 
 审计输出 `data-card.md`、`license-report.json`、`quota-report.json`、
 `quality-report.json` 和 manifest SHA-256。质量审计完全由哈希、格式、时间轴、配额、
-许可证、ASR、响度和 Mimi decode-check 自动完成，不读取人工 review ledger。
+许可证、ASR、响度和 原生声学 decode-check 自动完成，不读取人工 review ledger。
 
 ## 生产适配器
 
@@ -68,11 +68,10 @@ uv run data audit-canary-data --config "$CFG" --root "$ROOT" --fixture
 
 ## 标签语义
 
-`target_segments` 的 `start_sample` 必须落在 80 ms tick。包含最后助手采样的帧是
-assistant segment 内的 unit 标记为 `speech_mode=SPEECH`，其余 unit 标记为
-`speech_mode=SILENCE`；codec mask 只在 SPEECH unit 有效。
-其他帧为 false。公共真实输入 episode 的 target 全静音、没有 codec loss。Memory
-mask 在 Canary 保持 false，`PAUSE` 不使用。
+`target_segments`的start_sample必须落在200 ms边界，最后包含部分语音的unit保留完整目标。
+整段target包含讲话、等待和静音，所有已知目标都监督五个声学token。公共真实输入episode
+的target为真实监督静音，也有codec loss；缺失标签才mask，不以能量阈值决定监督。
+没有speech mode或独立memory mask/loss。原生tokenizer连续编码后每五token分组。
 
 ## 审计和训练导入
 
@@ -84,7 +83,7 @@ uv run data import-speech --config "$CFG" \
 ```
 
 审计拒绝重复 ID、跨 split speaker/session/template/scenario、时间戳和音频错误、错误的
-codec identity、缺失许可证哈希、配额超差、ASR 超标以及缺少 100 段 Mimi decode-check 的
+codec identity、缺失许可证哈希、配额超差、ASR 超标以及缺少 100 段 原生声学 decode-check 的
 正式 Canary。通过后再生成 processed shard。
 
 不需要人工 review ledger。可以用编排命令自动完成所有数据准备阶段：
@@ -101,12 +100,12 @@ uv run data prepare-canary-data --config "$CFG" --root "$ROOT" \
   --model-sha256 '<64-char-cosyvoice-model-sha256>' \
   --normalize-command 'path/to/normalizer-adapter' \
   --video-command 'path/to/video-adapter' \
-  --socket "$HOME/latentloop-data/runtime/sockets/mimi.sock" --encode
+  --native-source-lock "$HOME/latentloop-data/models/minicpm-o-4_5/eb4141de24550a3a1a4082f718be58f46b761728/source-lock.json" --encode
 ```
 
 `prepare-canary-data` 会完成 Canary 并通过自动审计；`--encode` 会为 train、validation、test
 生成 staging 和 processed shards。外部数据、CosyVoice、ASR、
-视频资产和 Mimi 仍必须提供真实适配器和锁定哈希，命令不会用 fixture 冒充生产产物。
+视频资产和 原生声学 仍必须提供真实适配器和锁定哈希，命令不会用 fixture 冒充生产产物。
 
 训练前最后执行 fail-closed 检查：
 
@@ -114,7 +113,7 @@ uv run data prepare-canary-data --config "$CFG" --root "$ROOT" \
 uv run data check-readiness --config configs/canary.yaml --root "$ROOT"
 ```
 
-该检查确认 audit、三个 split 的 manifest/shard、编码状态、Mimi 报告、初始 checkpoint 和磁盘
+该检查确认 audit、三个 split 的 manifest/shard、编码状态、原生声学 报告、初始 checkpoint 和磁盘
 空间；失败时不会进入训练。
 
 编码完成后，Pretrain 和 SFT 使用各自锁定的监督 manifest；Online RL 使用真实

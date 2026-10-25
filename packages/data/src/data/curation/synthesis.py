@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from data.curation.audio import fixture_voice, quality_metrics, write_flac
+from data.curation.audio import SAMPLE_RATE, fixture_voice, quality_metrics, write_flac
 from data.curation.common import (
     dataset_path,
     ensure_tree,
@@ -94,6 +94,7 @@ def _cached_synthesis(
             "voice_id",
             "voice_prompt_sha256",
             "model_sha256",
+            "sample_rate",
         )
     }
     cache_key = stable_hash(content_recipe)
@@ -131,6 +132,7 @@ def _store_synthesis_cache(
             "voice_id",
             "voice_prompt_sha256",
             "model_sha256",
+            "sample_rate",
         )
     }
     cache_key = stable_hash(content_recipe)
@@ -208,6 +210,7 @@ def synthesize_canary(
             prompt_hash = str(voices[voice_id]["prompt_sha256"])
             prompt_audio = root / str(voices[voice_id]["prompt_audio"])
             recipe = {
+                "sample_rate": SAMPLE_RATE,
                 "plan_id": plan["plan_id"],
                 "plan_recipe_sha256": plan["recipe_sha256"],
                 "turn_id": turn["turn_id"],
@@ -296,6 +299,7 @@ def synthesize_canary(
             text = str(item["response_text"])
             turn_id = "assistant-response"
             recipe = {
+                "sample_rate": SAMPLE_RATE,
                 "source_item_id": item["source_item_id"],
                 "turn_id": turn_id,
                 "text": text,

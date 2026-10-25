@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package avm.realtime.v1;
+package avm.realtime.v2;
 
 message MicPcm {
   uint32 sample_rate_hz = 1;
@@ -33,7 +33,7 @@ message SpeechSignal {
   uint32 sample_rate_hz = 1;
   uint32 channels = 2;
   string encoding = 3;
-  bool silent = 4;
+  reserved 4;
   bytes pcm = 5;
 }
 
@@ -43,6 +43,9 @@ message ActuationSignal {
   uint64 unit_index = 2;
   SpeechSignal speech = 3;
   reserved 4;
+  optional uint64 speech_unit_index = 6;
+  optional uint64 play_at_ms = 7;
+  uint64 generation_epoch = 8;
 }
 
 message EnvironmentReceipt {

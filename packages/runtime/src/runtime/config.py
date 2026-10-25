@@ -10,30 +10,53 @@ from omegaconf import OmegaConf
 
 @dataclass(slots=True)
 class ModelConfig:
-    model_dim: int = 256
-    num_layers: int = 4
-    num_heads: int = 8
-    ffn_dim: int = 1024
-    audio_tokens: int = 4
+    model_dim: int = 4096
+    num_layers: int = 36
+    num_heads: int = 32
+    kv_heads: int = 8
+    ffn_dim: int = 12288
+    rope_theta: float = 1_000_000.0
+    audio_dim: int = 1024
+    audio_layers: int = 24
+    audio_heads: int = 16
+    audio_ffn_dim: int = 4096
+    audio_cache_frames: int = 1500
+    audio_tokens: int = 2
     audio_kernel: int = 400
     audio_stride: int = 160
-    vision_tokens: int = 16
-    perceiver_slots: int = 16
+    vision_dim: int = 1152
+    vision_layers: int = 27
+    vision_heads: int = 16
+    vision_ffn_dim: int = 4304
+    vision_patch_size: int = 14
+    vision_position_grid: int = 70
+    vision_tokens: int = 64
+    perceiver_dim: int = 2048
+    perceiver_heads: int = 16
+    perceiver_ffn_dim: int = 8192
+    perceiver_slots: int = 64
     perceiver_layers: int = 2
     jepa_layers: int = 2
-    semantic_memory_slots: int = 8
+    jepa_dim: int = 1024
+    jepa_heads: int = 16
+    jepa_ffn_dim: int = 4096
+    semantic_memory_slots: int = 16
     slow_memory_type: str = "gated_delta"
     rematerialization_segment_units: int = 32
     # The formal Canary profile retains the most recent 30 seconds.
-    kv_units: int = 375
+    kv_units: int = 150
     kv_window_ms: int = 30_000
-    speech_frames_per_unit: int = 1
-    speech_codebooks: int = 8
-    speech_codebook_size: int = 2048
-    speech_depth_layers: int = 2
-    speech_depth_heads: int = 4
-    speech_depth_ffn_dim: int = 1024
-    dropout: float = 0.1
+    speech_frames_per_unit: int = 5
+    speech_codebooks: int = 1
+    speech_codebook_size: int = 6562
+    speech_dim: int = 768
+    speech_depth_layers: int = 20
+    speech_depth_heads: int = 12
+    speech_depth_ffn_dim: int = 3072
+    speech_window_units: int = 10
+    native_source_lock: str | None = None
+    native_qualification: str | None = None
+    dropout: float = 0.0
     activation_checkpointing: bool = False
 
     @property
@@ -49,17 +72,17 @@ class DataConfig:
     source: str = "synthetic"
     shards: str | None = None
     manifest: str | None = None
-    audio_sample_rate: int = 24_000
-    codec_frame_rate: float = 12.5
-    codec_id: str = "mimi-24khz-8x2048"
-    codec_weight_hash: str = "09b782f0629851a271227fb9d36db65c041790365f11bbe5d3d59369cf863f50"
-    codec_revision: str = "a49141e28b3d9c947cf9aa5314431e1b11cbd2f5"
-    codec_codebooks: int = 8
-    codec_codebook_size: int = 2048
-    unit_ms: int = 80
-    unit_audio_samples: int = 1_920
-    video_height: int = 224
-    video_width: int = 224
+    audio_sample_rate: int = 16_000
+    codec_frame_rate: float = 25.0
+    codec_id: str = "minicpm-o-4_5-s3-25hz"
+    codec_weight_hash: str = "d43342aa12163a80bf07bffb94c9de2e120a8df2f9917cd2f642e7f4219c6f71"
+    codec_revision: str = "eb4141de24550a3a1a4082f718be58f46b761728"
+    codec_codebooks: int = 1
+    codec_codebook_size: int = 6562
+    unit_ms: int = 200
+    unit_audio_samples: int = 3_200
+    video_height: int = 448
+    video_width: int = 448
     video_max_age_ms: int = 1000
     episode_units: int = 32
     train_episodes: int = 1_000
@@ -68,12 +91,13 @@ class DataConfig:
 
 @dataclass(slots=True)
 class TrainingConfig:
+    devices: list[str] = field(default_factory=list)
     stage: str = "pretrain"
     max_updates: int = 10_000
     weight_decay: float = 0.1
     gradient_accumulation_steps: int = 16
-    tbptt_units: int = 375
-    mixed_precision: str = "fp16"
+    tbptt_units: int = 150
+    mixed_precision: str = "bf16"
     max_grad_norm: float = 1.0
     checkpoint_every: int = 500
     log_every: int = 10
@@ -85,15 +109,18 @@ class TrainingConfig:
     backbone_train_mode: str = "all"
     speech_loss_weight: float = 1.0
     jepa_loss_weight: float = 1.0
-    memory_horizon_units: int = 375
+    memory_horizon_units: int = 150
     min_learning_rate_ratio: float = 0.1
     rl: RLConfig = field(default_factory=lambda: RLConfig())
 
 
 @dataclass(slots=True)
 class RLConfig:
+    policy_device: str | None = None
+    reference_device: str | None = None
+    candidate_devices: list[str] = field(default_factory=list)
     algorithm: str = "online_recurrent_ppo"
-    ppo_window_units: int = 375
+    ppo_window_units: int = 150
     ppo_epochs: int = 4
     gae_lambda: float = 0.95
     discount_time_constant_ms: float = 10_000.0
@@ -102,18 +129,17 @@ class RLConfig:
     sft_replay_coef: float = 0.1
     on_policy_jepa_coef: float = 0.1
     replay_jepa_coef: float = 0.1
-    max_pending_reward_units: int = 375
+    max_pending_reward_units: int = 150
     candidate_max_reference_kl: float = 1.0
     candidate_max_eval_loss_ratio: float = 1.25
     candidate_max_rejections: int = 3
     clip_epsilon: float = 0.2
     reference_kl_beta: float = 0.02
     environment_socket: str | None = None
-    codec_socket: str | None = None
     reward_socket: str | None = None
     environment_id: str = ""
     environment_version: str = "1"
-    environment_protocol_version: str = "avm-realtime-v1"
+    environment_protocol_version: str = "avm-realtime-v2"
     reward_spec_id: str = "avm-dialogue-v1"
     judge_model_id: str = "external-frozen-multimodal"
     judge_revision: str = "unconfigured"
@@ -148,6 +174,10 @@ class RuntimeConfig:
     recipe_name: str | None = None
     stage_name: str | None = None
     require_cuda: bool = False
+    playback_delay_ms: int = 600
+    acoustic_cuda_device: int = 0
+    native_acoustic_socket: str | None = None
+    clock_kind: str = "monotonic"
 
     def root_path(self) -> Path:
         return Path(self.experiment_root).expanduser().resolve()
@@ -175,6 +205,14 @@ class ProjectConfig:
         return asdict(self)
 
     def validate(self) -> None:
+        if self.runtime.clock_kind not in {"monotonic", "logical_fixture"}:
+            raise ValueError("runtime clock_kind must be monotonic or logical_fixture")
+        devices = (self.training.devices + self.training.rl.candidate_devices
+                   + [value for value in (self.training.rl.policy_device,
+                                          self.training.rl.reference_device) if value])
+        if any(value != "cpu" and not (value.startswith("cuda:")
+                   and value[5:].isdigit()) for value in devices):
+            raise ValueError("placement devices must be cpu or explicit cuda:N")
         if self.model.model_dim % self.model.num_heads:
             raise ValueError("model_dim must be divisible by num_heads")
         if self.model.audio_kernel < self.model.audio_stride:
@@ -184,14 +222,19 @@ class ProjectConfig:
         expected_kv_units = -(-self.model.kv_window_ms // self.data.unit_ms)
         if self.model.kv_units != expected_kv_units:
             raise ValueError("KV must exactly cover kv_window_ms at the configured unit_ms")
-        if self.model.vision_tokens != 16:
-            raise ValueError("vision_tokens must be 16")
-        if (
-            self.model.perceiver_slots != 16
-            or self.model.perceiver_layers != 2
-            or self.model.jepa_layers != 2
-        ):
-            raise ValueError("Perceiver/JEPA topology must be 16 slots and 2/2 layers")
+        if self.model.num_heads % self.model.kv_heads:
+            raise ValueError("query heads must be divisible by KV heads")
+        for dim, heads in ((self.model.audio_dim, self.model.audio_heads),
+                           (self.model.vision_dim, self.model.vision_heads),
+                           (self.model.perceiver_dim, self.model.perceiver_heads),
+                           (self.model.jepa_dim, self.model.jepa_heads),
+                           (self.model.speech_dim, self.model.speech_depth_heads)):
+            if dim % heads:
+                raise ValueError("native module widths must be divisible by their heads")
+        if self.model.perceiver_layers != 2 or self.model.jepa_layers != 2:
+            raise ValueError("Perceiver/JEPA require two layers each")
+        if self.model.speech_window_units < 1 or self.model.audio_cache_frames < 10:
+            raise ValueError("native speech and audio caches must have positive capacity")
         if self.model.slow_memory_type != "gated_delta":
             raise ValueError("slow_memory_type must be gated_delta")
         if self.model.semantic_memory_slots < 1:
@@ -208,6 +251,11 @@ class ProjectConfig:
             )
         if self.data.source not in {"synthetic", "webdataset"}:
             raise ValueError("data.source must be synthetic or webdataset")
+        if self.runtime.clock_kind == "logical_fixture" and (
+            self.data.dataset != "synthetic" or self.model.native_source_lock
+            or self.data.codec_id == "minicpm-o-4_5-s3-25hz"
+        ):
+            raise ValueError("logical fixture clocks require explicit synthetic data and codec")
         if self.data.dataset != "synthetic" and self.data.source != "webdataset":
             raise ValueError("real and gate datasets must use webdataset data.source")
         if self.data.source == "webdataset" and not self.data.shards:
@@ -222,23 +270,26 @@ class ProjectConfig:
             or audio_frames % self.model.audio_tokens
         ):
             raise ValueError("audio convolution frames must divide into model audio tokens")
-        if self.data.video_height != 224 or self.data.video_width != 224:
-            raise ValueError("video input must be exactly 224x224")
+        if self.data.unit_ms != 200 or self.data.audio_sample_rate != 16000:
+            raise ValueError("native AVM requires 200 ms and 16 kHz microphone audio")
+        if (self.data.video_height % self.model.vision_patch_size
+                or self.data.video_width % self.model.vision_patch_size):
+            raise ValueError("video dimensions must be divisible by the native patch size")
         if self.data.video_max_age_ms < self.data.unit_ms:
             raise ValueError("video_max_age_ms must cover at least one stream unit")
         if self.data.codec_codebooks != self.model.speech_codebooks:
             raise ValueError("data and model codec codebook counts must match")
         if self.data.codec_codebook_size != self.model.speech_codebook_size:
             raise ValueError("data and model codec vocabularies must match")
-        if self.data.unit_ms * self.data.codec_frame_rate != 1_000:
-            raise ValueError("direct speech requires exactly one codec frame per stream unit")
-        if self.model.speech_frames_per_unit != 1:
-            raise ValueError("direct speech requires exactly one speech frame per stream unit")
+        if self.data.unit_ms * self.data.codec_frame_rate != 5_000:
+            raise ValueError("continuous speech requires five 25 Hz tokens per stream unit")
+        if self.model.speech_frames_per_unit != 5 or self.model.speech_codebooks != 1:
+            raise ValueError("continuous speech requires exactly five tokens from one codebook")
         if (
             self.model.speech_depth_heads < 1
-            or self.model.model_dim % self.model.speech_depth_heads
+            or self.model.speech_dim % self.model.speech_depth_heads
         ):
-            raise ValueError("model_dim must be divisible by speech_depth_heads")
+            raise ValueError("speech_dim must be divisible by speech_depth_heads")
         if self.training.tbptt_units < 1:
             raise ValueError("tbptt_units must be positive")
         if not 0 <= self.training.codec_scheduled_sampling <= 1:
@@ -284,7 +335,6 @@ class ProjectConfig:
         if self.training.stage == "rl" and self.data.dataset == "canary":
             if (
                 not rl.environment_socket
-                or not rl.codec_socket
                 or not rl.reward_socket
                 or not rl.environment_id
                 or not rl.environment_version
@@ -296,7 +346,7 @@ class ProjectConfig:
                 or not rl.sft_preservation_manifest
             ):
                 raise ValueError(
-                    "formal RL requires environment, codec and reward sockets, "
+                    "formal RL requires environment and reward sockets, native assets, "
                     "environment identity, session_manifest and SFT guard datasets"
                 )
             if (
@@ -324,23 +374,37 @@ class ProjectConfig:
         if self.training.tbptt_units != self.training.memory_horizon_units:
             raise ValueError("tbptt_units must equal memory_horizon_units")
         if (
-            self.data.dataset == "canary" and self.training.memory_horizon_units != 375
+            self.data.dataset == "canary" and self.training.memory_horizon_units != 150
         ):
-            raise ValueError("formal Canary memory horizon must be exactly 375 units")
+            raise ValueError("formal Canary memory horizon must be exactly 150 units")
         if (
             self.data.dataset == "canary"
             and self.model.rematerialization_segment_units
             >= self.training.memory_horizon_units
         ):
             raise ValueError(
-                "formal Canary rematerialization segment must be shorter than 375 units"
+                "formal Canary rematerialization segment must be shorter than 150 units"
             )
         if not 0 <= self.training.min_learning_rate_ratio <= 1:
             raise ValueError("min_learning_rate_ratio must be in [0, 1]")
         if not 0 <= self.training.warmup_ratio < 1:
             raise ValueError("warmup_ratio must be in [0, 1)")
-        if self.training.mixed_precision not in {"no", "fp16"}:
-            raise ValueError("RTX 2080 SUPER profiles support mixed_precision=no or fp16")
+        if self.training.mixed_precision not in {"no", "fp16", "bf16"}:
+            raise ValueError("mixed_precision must be no, fp16 or bf16")
+        if self.data.dataset == "canary":
+            native = ModelConfig()
+            dimensions = ("model_dim", "num_layers", "num_heads", "kv_heads", "ffn_dim",
+                          "audio_dim", "audio_layers", "audio_heads", "audio_ffn_dim",
+                          "vision_dim", "vision_layers", "vision_heads", "vision_ffn_dim",
+                          "vision_patch_size", "vision_position_grid", "vision_tokens",
+                          "speech_dim", "speech_depth_layers", "speech_depth_heads",
+                          "speech_depth_ffn_dim", "speech_codebook_size")
+            if any(getattr(self.model, name) != getattr(native, name) for name in dimensions):
+                raise ValueError("formal Canary must retain native MiniCPM-o 4.5 dimensions")
+            if not self.model.native_source_lock:
+                raise ValueError("formal Canary requires a native source lock")
+            if self.model.perceiver_slots != 64 or self.model.semantic_memory_slots != 16:
+                raise ValueError("formal AVM requires 64 work slots and 16 semantic slots")
 
 
 def load_config(path: str | Path, overrides: list[str] | None = None) -> ProjectConfig:

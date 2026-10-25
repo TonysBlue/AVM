@@ -11,7 +11,7 @@ raw tokens、文字转录、设备来源标签、receipt、reward 和隐藏环�
 屏幕共享，PulseAudio 接入包含对端与播放回流的混合输入，pacat 播放模型语音。
 音视频采集线程独立于推理与播放；低帧率复用最新因果帧，首帧等待、超时或断连显式失败。
 默认采集 backlog 上限 3 units、播放队列上限 2 units，超出预算失败，不静默丢音频。
-SILENCE 清空待播语音并终止当前播放进程；后续 SPEECH 可重新启动播放。
+外部cancel增加epoch并清除旧队列；静音仍按连续声学token播放。
 
 配置声明 mixed_audio_source、playback_sink、video_max_age_ms 和 scenarios。每个 scenario
 包含 video_kind（camera/video/screen）及 video_source；scenario_id 是场景身份，不是电脑快照。

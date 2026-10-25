@@ -31,7 +31,7 @@ cursor 不一致时 fail closed。
 视频按采集时间和 revision 选择最新因果帧，超时与断连明确失败。
 
 生命期创建返回 unit 0；unit N 的 ActuationSignal 只能作用于同一 session 的 unit N
-ObservationSignal，并返回 unit N receipt 和 unit N+1 ObservationSignal。80 ms 音频单元固定为
+ObservationSignal，并返回 unit N receipt 和 unit N+1 ObservationSignal。200 ms 音频单元固定为
 24 kHz 单声道，即 float32 PCM 为 7,680 bytes，int16 PCM 为 3,840 bytes。Harness 不接受
 任意长度 PCM 来掩盖音频设备或 codec 错误。
 
@@ -48,7 +48,7 @@ close 与启动失败清理设备进程/线程，采集和播放队列保持有�
 
 ## 契约测试设计
 
-契约测试必须覆盖 protobuf round-trip、模型输出张量不跨物理边界、80 ms PCM 校验、identity 查询不
+契约测试必须覆盖 protobuf round-trip、模型输出张量不跨物理边界、200 ms PCM 校验、identity 查询不
 泄漏 backend、重复 reset 关闭旧 backend、未知 session、错序 unit、错 session、
 backend 返回错误 identity、server shutdown 清理全部 session，以及 receipt protobuf
 round-trip。设备生命周期测试验证视频因果时序、播放打断、持续采集、队列上限和资源回收。
@@ -57,7 +57,7 @@ round-trip。设备生命周期测试验证视频因果时序、播放打断、�
 调用正式 `train_online_ppo` 和 `PhysicalRolloutClient`。测试使用一个 lifetime session、多个
 连续 RewardEvent，并至少完成一次 optimizer update。它必须断言：
 
-1. speech token 经正式 worker 解码为恰好一个 80 ms PCM，Harness 收不到 raw token tensor。
+1. speech token 经正式 worker 解码为恰好一个 200 ms PCM，Harness 收不到 raw token tensor。
 2. reset、apply、receipt 和下一轮 observation 的 session/unit 严格递增，
    speech PCM 经过 protobuf round-trip。
 3. receipt、任务成功、DOM 和 evaluator 字段不能发送给 Reward Judge，也不能出现在下一轮

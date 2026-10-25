@@ -1,9 +1,10 @@
 defaults:
-  - ../canary
-  - _self_
+- ../canary
+- _self_
 training:
   stage: rl
   max_updates: 400
   backbone_train_mode: all
+  mixed_precision: bf16
 runtime:
   run_name: canary-rl

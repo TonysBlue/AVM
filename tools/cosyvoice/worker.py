@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import soundfile as sf
 import torch
+import torchaudio
 
 HEADER = struct.Struct("!I")
 TARGET_LUFS = -23.0
@@ -70,11 +71,12 @@ def synthesize(
     if not results:
         raise RuntimeError("CosyVoice produced no audio")
     waveform = torch.cat([item["tts_speech"].detach().cpu() for item in results], dim=1)
+    waveform = torchaudio.functional.resample(waveform, model.sample_rate, 16000)
     output.parent.mkdir(parents=True, exist_ok=True)
     sf.write(
         output,
         normalize(waveform.squeeze(0).numpy()),
-        model.sample_rate,
+        16000,
         format="FLAC",
         subtype="PCM_16",
     )

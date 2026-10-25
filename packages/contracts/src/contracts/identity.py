@@ -5,8 +5,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class ProtocolIdentity:
-    protocol_version: str = "avm-realtime-v1"
-    codec_id: str = "mimi-24khz-8x2048"
+    protocol_version: str = "avm-realtime-v2"
+    codec_id: str = "minicpm-o-4_5-s3-25hz"
 
     def __post_init__(self) -> None:
         if not all((self.protocol_version, self.codec_id)):

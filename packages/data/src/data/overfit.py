@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import torch
-from model.types import Episode, SpeechMode, StreamUnit
+from model.types import Episode, StreamUnit
 from runtime.config import DataConfig, ModelConfig
 
 
@@ -55,14 +55,14 @@ class SpeechOverfitDataset:
                 "response_class": response_class,
                 "variant": variant,
                 "stage": "sft",
-                "schema_id": "avm-episode-v1",
+                "schema_id": "avm-episode-v2",
                 "dataset_scale": self.data.dataset,
                 "sample_kind": "supervised_episode",
                 "supervision_kind": "speech",
                 "task_id": f"overfit-task-{episode_index}",
                 "environment_id": "synthetic-test-only",
                 "environment_version": "1",
-                "protocol_version": "avm-realtime-v1",
+                "protocol_version": "avm-realtime-v2",
             },
             target_speech=target,
             sample_index_in_shard=episode_index,
@@ -120,19 +120,14 @@ class SpeechOverfitDataset:
         active_ticks: int,
     ) -> StreamUnit:
         frame = self.data.unit_audio_samples
-        speaking = start_tick <= index < start_tick + active_ticks
         # The direct codec target is filled by the codec preparation stage.
         return StreamUnit(
             timestamp_ms=torch.tensor([index * self.data.unit_ms]),
             delta_ms=torch.tensor([self.data.unit_ms]),
             mic_audio=microphone[None, index * frame : (index + 1) * frame],
             video=torch.zeros(1, 3, self.data.video_height, self.data.video_width),
-            speech_mode=torch.tensor([int(SpeechMode.SPEECH if speaking else SpeechMode.SILENCE)]),
-            speech_mode_mask=torch.tensor([True]),
             speech_codes=torch.zeros(
                 1, self.model.speech_frames_per_unit, self.model.speech_codebooks, dtype=torch.long
             ),
-            speech_codec_mask=torch.full(
-                (1, self.model.speech_frames_per_unit), speaking, dtype=torch.bool
-            ),
+            speech_codec_mask=torch.ones((1, 5), dtype=torch.bool),
         )

@@ -38,9 +38,13 @@ class Perceiver(nn.Module):
     """Compress all observation stems into fixed, ordered multimodal slots."""
 
     def __init__(
-        self, dim: int, heads: int, ffn_dim: int, slots: int, layers: int, dropout: float
+        self, dim: int, heads: int, ffn_dim: int, slots: int, layers: int, dropout: float,
+        input_dim: int | None = None,
     ) -> None:
         super().__init__()
+        input_dim = input_dim or dim
+        self.input_projection = nn.Linear(input_dim, dim) if input_dim != dim else nn.Identity()
+        self.output_projection = nn.Linear(dim, input_dim) if input_dim != dim else nn.Identity()
         self.queries = nn.Parameter(torch.zeros(slots, dim))
         self.layers = nn.ModuleList(
             _PerceiverBlock(dim, heads, ffn_dim, dropout) for _ in range(layers)
@@ -49,10 +53,11 @@ class Perceiver(nn.Module):
         nn.init.normal_(self.queries, std=0.02)
 
     def forward(self, inputs: Tensor) -> Tensor:
+        inputs = self.input_projection(inputs)
         slots = self.queries[None].expand(inputs.shape[0], -1, -1)
         for layer in self.layers:
             slots = layer(slots, inputs)
-        return self.final_norm(slots)
+        return self.output_projection(self.final_norm(slots))
 
 
 class _JEPABlock(nn.Module):
@@ -89,8 +94,12 @@ class JEPAHead(nn.Module):
         slots: int,
         layers: int,
         dropout: float,
+        input_dim: int | None = None,
     ) -> None:
         super().__init__()
+        input_dim = input_dim or dim
+        self.input_projection = nn.Linear(input_dim, dim) if input_dim != dim else nn.Identity()
+        self.output_projection = nn.Linear(dim, input_dim) if input_dim != dim else nn.Identity()
         self.slot_identity = nn.Parameter(torch.zeros(slots, dim))
         self.layers = nn.ModuleList(
             _JEPABlock(dim, heads, ffn_dim, dropout) for _ in range(layers)
@@ -99,10 +108,10 @@ class JEPAHead(nn.Module):
         nn.init.normal_(self.slot_identity, std=0.02)
 
     def forward(self, hidden: Tensor) -> Tensor:
-        slots = hidden + self.slot_identity[None]
+        slots = self.input_projection(hidden) + self.slot_identity[None]
         for layer in self.layers:
             slots = layer(slots)
-        return self.final_norm(slots)
+        return self.output_projection(self.final_norm(slots))
 
 
 __all__ = ["JEPAHead", "Perceiver"]

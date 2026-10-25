@@ -31,8 +31,8 @@ class RecordingHarness:
         return {
             "environment_id": "test-physical",
             "environment_version": "1",
-            "protocol_version": "avm-realtime-v1",
-            "schema_id": "avm-episode-v1",
+            "protocol_version": "avm-realtime-v2",
+            "schema_id": "avm-episode-v2",
         }
 
     def apply(
@@ -52,27 +52,27 @@ class RecordingHarness:
         return ObservationSignal(
             session_id,
             unit_index,
-            unit_index * 80,
-            80,
-            MicSignal(np.zeros(1920, dtype=np.float32).tobytes()),
+            unit_index * 200,
+            200,
+            MicSignal(np.zeros(3200, dtype=np.float32).tobytes()),
             VideoSignal(b"x" * (224 * 224 * 3), 224, 224, captured_at_ms=0, revision=0),
         )
 
 
 def _speech(value: float = 0.0) -> SpeechSignal:
-    pcm = np.full(1920, value, dtype=np.float32).tobytes()
-    return SpeechSignal(pcm, silent=value == 0.0)
+    pcm = np.full(4800, value, dtype=np.float32).tobytes()
+    return SpeechSignal(pcm)
 
 
 def _codec_metadata() -> dict[str, str]:
     return {
-        "codec_id": "mimi-24khz-8x2048",
+        "codec_id": "minicpm-o-4_5-s3-25hz",
         "codec_weight_hash": "hash",
         "codec_revision": "revision",
         "environment_id": "test-physical",
         "environment_version": "1",
-        "protocol_version": "avm-realtime-v1",
-        "schema_id": "avm-episode-v1",
+        "protocol_version": "avm-realtime-v2",
+        "schema_id": "avm-episode-v2",
     }
 
 
@@ -88,10 +88,9 @@ def test_expert_capture_persists_and_exports_current_episode(tmp_path) -> None:
     assert (tmp_path / "capture" / "sealed.json").is_file()
     assert (tmp_path / "capture" / "transitions.jsonl").is_file()
     assert len(ledger.records) == len(episode.units) == 1
-    assert episode.units[0].speech_codec_mask.item()
-    assert episode.units[0].speech_mode.item() == 1
+    assert episode.units[0].speech_codec_mask.all()
     assert episode.target_speech is not None
-    assert float(episode.target_speech.mean()) == pytest.approx(0.25)
+    assert float(episode.target_speech.mean()) == pytest.approx(0.25, abs=1e-4)
     assert harness.closed == ["capture-1"]
 
 
@@ -166,7 +165,8 @@ def test_replay_rejects_nonphysical_webdataset_audio_clock(
     write_episode_shards([episode], tmp_path / "train-%06d.tar")
     harness = RecordingHarness()
 
-    with pytest.raises(ValueError, match="physical 1920-sample"):
+    smoke_config.data.unit_audio_samples = 1600
+    with pytest.raises(ValueError, match="mic_audio must have shape"):
         replay_episode(
             str(tmp_path / "train-*.tar"),
             data_config=smoke_config.data,

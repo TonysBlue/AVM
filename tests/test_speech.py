@@ -21,7 +21,7 @@ from runtime.codec_worker import (
 from runtime.config import ProjectConfig
 
 
-def test_later_teacher_codebooks_do_not_change_earlier_logits(
+def test_later_teacher_tokens_do_not_change_earlier_logits(
     smoke_config: ProjectConfig,
 ) -> None:
     model = StreamingLatentLoop(smoke_config.model).eval()
@@ -29,16 +29,16 @@ def test_later_teacher_codebooks_do_not_change_earlier_logits(
     state = model.initial_state(1, "cpu")
     first_codes = unit.speech_codes.clone()
     changed_codes = first_codes.clone()
-    changed_codes[:, :, 0] = (changed_codes[:, :, 0] + 1) % 32
+    changed_codes[:, 0, 0] = (changed_codes[:, 0, 0] + 1) % 31
 
     first = model(unit.observation, state, first_codes).speech_codec_logits
     changed = model(unit.observation, state, changed_codes).speech_codec_logits
 
-    assert torch.equal(first[:, :, 0], changed[:, :, 0])
-    assert not torch.equal(first[:, :, 1], changed[:, :, 1])
+    assert torch.equal(first[:, 0], changed[:, 0])
+    assert not torch.equal(first[:, 1], changed[:, 1])
 
 
-def test_generate_step_returns_one_complete_codec_frame(
+def test_generate_step_returns_five_complete_acoustic_tokens(
     smoke_config: ProjectConfig,
 ) -> None:
     model = StreamingLatentLoop(smoke_config.model).eval()
@@ -49,16 +49,18 @@ def test_generate_step_returns_one_complete_codec_frame(
         SpeechSamplingConfig(greedy=True),
     )
 
-    assert generated.speech_codes.shape == (1, 1, smoke_config.model.speech_codebooks)
+    assert generated.speech_codes.shape == (1, 5, 1)
     assert generated.output.state.speech_local.previous_codes.shape == (
         1,
-        smoke_config.model.speech_codebooks,
+        5, 1,
     )
 
 
-def test_speech_mode_is_binary() -> None:
-    logits = torch.tensor([[0.0, 1.0], [9.0, 8.0]])
-    assert logits.argmax(dim=-1).tolist() == [1, 0]
+def test_native_speech_sampling_excludes_eos() -> None:
+    from model.speech import NativeSpeechHead
+
+    logits = torch.tensor([[0.0, 1.0, 100.0], [9.0, 8.0, 100.0]])
+    assert NativeSpeechHead._sample(logits, SpeechSamplingConfig(greedy=True)).tolist() == [1, 0]
 
 
 def test_codec_accuracy_reports_each_codebook() -> None:

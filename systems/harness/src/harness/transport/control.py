@@ -62,7 +62,7 @@ class HarnessControlServer:
         *,
         expected_environment_id: str | None = None,
         expected_environment_version: str | None = None,
-        expected_protocol_version: str = "avm-realtime-v1",
+        expected_protocol_version: str = "avm-realtime-v2",
     ) -> None:
         self.backend_factory = backend_factory
         self.socket_path = Path(socket_path).expanduser()
@@ -221,6 +221,15 @@ class HarnessControlServer:
                     "observation": base64.b64encode(observation_to_payload(observation)).decode(),
                     "receipt": base64.b64encode(receipt_to_payload(receipt)).decode(),
                 }
+            if operation == "flush_speech":
+                state = self._backends[session_id]
+                outputs = [message_to_actuation(base64.b64decode(value, validate=True))
+                           for value in request["actuations"]]
+                state.backend.flush_speech(outputs)
+                return {"ok": True}
+            if operation == "cancel_speech":
+                self._backends[session_id].backend.cancel_speech(int(request["epoch"]))
+                return {"ok": True}
             if operation == "close":
                 state = self._backends.pop(session_id, None)
                 if state is not None:
@@ -338,3 +347,11 @@ class HarnessControlClient:
             self._request({"operation": "close", "session_id": session_id})
         except RuntimeError:
             pass
+
+    def flush_speech(self, session_id: str, outputs: list[ActuationSignal]) -> None:
+        self._request({"operation": "flush_speech", "session_id": session_id,
+                       "actuations": [base64.b64encode(actuation_to_payload(value)).decode()
+                                      for value in outputs]})
+
+    def cancel_speech(self, session_id: str, epoch: int) -> None:
+        self._request({"operation": "cancel_speech", "session_id": session_id, "epoch": epoch})

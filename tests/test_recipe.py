@@ -77,7 +77,7 @@ def test_recipe_chains_stage_checkpoint_and_evaluates(
             "data:\n  dataset: direct-speech-overfit\n  source: webdataset\n"
             "  shards: /unused/train-*.tar\n  manifest: /unused/train-manifest.jsonl\n"
             f"training:\n  max_updates: {1 if name == 'first' else 2}\n"
-            "runtime:\n  data_root: " + str(tmp_path / "datasets") + "\n",
+            "runtime:\n  clock_kind: monotonic\n  data_root: " + str(tmp_path / "datasets") + "\n",
             encoding="utf-8",
         )
     recipe = recipes / "test.yaml"
@@ -130,7 +130,7 @@ def test_recipe_run_id_isolated_and_resume_validates_checkpoint(
         "data:\n  dataset: direct-speech-overfit\n  source: webdataset\n"
         "  shards: /unused/train-*.tar\n  manifest: /unused/train-manifest.jsonl\n"
         "training:\n  max_updates: 1\n"
-        "runtime:\n  data_root: " + str(tmp_path / "datasets") + "\n",
+        "runtime:\n  clock_kind: monotonic\n  data_root: " + str(tmp_path / "datasets") + "\n",
         encoding="utf-8",
     )
     recipe = tmp_path / "recipe.yaml"
@@ -168,7 +168,7 @@ def test_recipe_rejects_mismatched_existing_checkpoint(
         "data:\n  dataset: direct-speech-overfit\n  source: webdataset\n"
         "  shards: /unused/train-*.tar\n  manifest: /unused/train-manifest.jsonl\n"
         "training:\n  max_updates: 1\n"
-        "runtime:\n  data_root: " + str(tmp_path / "datasets") + "\n",
+        "runtime:\n  clock_kind: monotonic\n  data_root: " + str(tmp_path / "datasets") + "\n",
         encoding="utf-8",
     )
     recipe = tmp_path / "recipe.yaml"

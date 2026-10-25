@@ -7,11 +7,17 @@ import random
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 import torch
-from model.types import LayerKV, RecurrentState, SlowMemoryState, SpeechLocalState
+from model.types import (
+    AudioEncoderState,
+    LayerKV,
+    RecurrentState,
+    SlowMemoryState,
+    SpeechLocalState,
+)
 from torch import nn
 
 
@@ -34,7 +40,9 @@ class CheckpointMetadata:
     parent_sha256: str | None = None
     stage: str = "pretrain"
     algorithm: str | None = None
-    model_schema_id: str = "avm-model-v2"
+    model_schema_id: str = "avm-model-v3"
+    native_source_lock_sha256: str | None = None
+    native_qualification_sha256: str | None = None
     reference_checkpoint_sha256: str | None = None
     environment_id: str | None = None
     session_manifest_sha256: str | None = None
@@ -68,19 +76,27 @@ def _serialize_state(state: RecurrentState | None) -> dict[str, Any] | None:
     if state is None:
         return None
     return {
-        "layer_kv": [
-            (cache.key.cpu(), cache.value.cpu())
-            for cache in state.layer_kv
-        ],
+        "layer_kv": [(cache.key.cpu(), cache.value.cpu()) for cache in state.layer_kv],
         "semantic_memory": state.semantic_memory.cpu(),
         "slow_memory": [
             {"matrix": memory.matrix.cpu(), "normalizer": memory.normalizer.cpu()}
             for memory in state.slow_memory
         ],
-        "audio_cache": state.audio_cache.cpu(),
+        "audio_cache": {
+            "pcm": state.audio_cache.pcm.cpu(),
+            "conv1": state.audio_cache.conv1.cpu(),
+            "conv2": state.audio_cache.conv2.cpu(),
+            "layer_kv": [
+                (cache.key.cpu(), cache.value.cpu()) for cache in state.audio_cache.layer_kv
+            ],
+            "max_logmel": state.audio_cache.max_logmel.cpu(),
+            "position": state.audio_cache.position.cpu(),
+        },
         "hidden": state.hidden.cpu(),
         "speech_local": {
-            "temporal": state.speech_local.temporal.cpu(),
+            "layer_kv": [
+                (cache.key.cpu(), cache.value.cpu()) for cache in state.speech_local.layer_kv
+            ],
             "previous_codes": state.speech_local.previous_codes.cpu(),
         },
         "unit_index": state.unit_index.cpu(),
@@ -102,10 +118,23 @@ def _deserialize_state(
             SlowMemoryState(item["matrix"].to(device), item["normalizer"].to(device))
             for item in payload["slow_memory"]
         ),
-        audio_cache=payload["audio_cache"].to(device),
+        audio_cache=AudioEncoderState(
+            pcm=payload["audio_cache"]["pcm"].to(device),
+            conv1=payload["audio_cache"]["conv1"].to(device),
+            conv2=payload["audio_cache"]["conv2"].to(device),
+            layer_kv=tuple(
+                LayerKV(key.to(device), value.to(device))
+                for key, value in payload["audio_cache"]["layer_kv"]
+            ),
+            max_logmel=payload["audio_cache"]["max_logmel"].to(device),
+            position=payload["audio_cache"]["position"].to(device),
+        ),
         hidden=payload["hidden"].to(device),
         speech_local=SpeechLocalState(
-            temporal=payload["speech_local"]["temporal"].to(device),
+            layer_kv=tuple(
+                LayerKV(key.to(device), value.to(device))
+                for key, value in payload["speech_local"]["layer_kv"]
+            ),
             previous_codes=payload["speech_local"]["previous_codes"].to(device),
         ),
         unit_index=payload["unit_index"].to(device),
@@ -115,15 +144,27 @@ def _deserialize_state(
 def _parse_metadata(payload: Any) -> CheckpointMetadata:
     if not isinstance(payload, dict):
         raise ValueError("checkpoint metadata is incomplete")
-    if payload.get("model_schema_id") != "avm-model-v2":
+    if payload.get("model_schema_id") != "avm-model-v3":
         raise ValueError("checkpoint AVM model schema is missing or incompatible")
     if "objective" in payload:
-        raise ValueError(
-            "checkpoint objective is removed; create a new stage/algorithm checkpoint"
-        )
+        raise ValueError("checkpoint objective is removed; create a new stage/algorithm checkpoint")
     if "algorithm" not in payload:
         raise ValueError("checkpoint algorithm identity is missing")
     return CheckpointMetadata(**payload)
+
+
+class OptimizerState(Protocol):
+    def state_dict(self) -> dict[str, Any]: ...
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None: ...
+
+
+def capture_rng_state() -> dict[str, Any]:
+    return {
+        "python": random.getstate(), "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+    }
 
 
 class CheckpointManager:
@@ -136,11 +177,12 @@ class CheckpointManager:
         name: str,
         *,
         model: nn.Module,
-        optimizer: torch.optim.Optimizer,
+        optimizer: OptimizerState,
         scheduler: Any | None,
         scaler: Any | None,
         recurrent_state: RecurrentState | None,
         reference_recurrent_state: RecurrentState | None = None,
+        rng_state: dict[str, Any] | None = None,
         train_state: dict[str, Any],
         data_cursor: DataCursor,
         metadata: CheckpointMetadata,
@@ -158,12 +200,7 @@ class CheckpointManager:
             "data_cursor": asdict(data_cursor),
             "metadata": asdict(metadata),
             "config_hash": config_hash(config),
-            "rng": {
-                "python": random.getstate(),
-                "numpy": np.random.get_state(),
-                "torch": torch.get_rng_state(),
-                "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-            },
+            "rng": rng_state if rng_state is not None else capture_rng_state(),
         }
         with tempfile.NamedTemporaryFile(
             dir=self.directory,
@@ -243,20 +280,18 @@ class CheckpointManager:
         path: str | Path,
         *,
         model: nn.Module,
-        optimizer: torch.optim.Optimizer,
+        optimizer: OptimizerState,
         scheduler: Any | None,
         scaler: Any | None,
         device: torch.device,
         config: dict[str, Any],
         expected_metadata: CheckpointMetadata,
     ) -> tuple[dict[str, Any], DataCursor, RecurrentState | None, CheckpointMetadata]:
-        payload = torch.load(Path(path), map_location=device, weights_only=False)
+        payload = torch.load(Path(path), map_location="cpu", weights_only=False, mmap=True)
         if not isinstance(payload.get("model"), dict) or not isinstance(
             payload.get("metadata"), dict
         ):
-            raise ValueError(
-                "checkpoint is incomplete; only the current contract is supported"
-            )
+            raise ValueError("checkpoint is incomplete; only the current contract is supported")
         if payload["config_hash"] != config_hash(config):
             raise ValueError("checkpoint configuration does not match the current run")
         restored_metadata = _parse_metadata(payload["metadata"])
@@ -268,6 +303,8 @@ class CheckpointManager:
             "stage",
             "algorithm",
             "model_schema_id",
+            "native_source_lock_sha256",
+            "native_qualification_sha256",
             "reference_checkpoint_sha256",
             "environment_id",
             "session_manifest_sha256",
@@ -312,8 +349,6 @@ def inspect_checkpoint(
     return payload["train_state"], _parse_metadata(payload["metadata"])
 
 
-def load_reference_recurrent_state(
-    path: str | Path, device: torch.device
-) -> RecurrentState | None:
+def load_reference_recurrent_state(path: str | Path, device: torch.device) -> RecurrentState | None:
     payload = torch.load(Path(path), map_location="cpu", weights_only=False)
     return _deserialize_state(payload.get("reference_recurrent_state"), device)

@@ -1,15 +1,14 @@
-defaults:
-  - canary
-  - _self_
-
-# Capacity gate: the complete Canary model and 375-unit recurrent horizon on
+# Capacity gate: the complete Canary model and 150-unit recurrent horizon on
 # synthetic physical-shape inputs. Only run budget and external assets differ.
+defaults:
+- canary
+- _self_
 data:
   dataset: synthetic
   source: synthetic
   shards: null
   manifest: null
-  episode_units: 375
+  episode_units: 150
   train_episodes: 1
 training:
   stage: pretrain
@@ -18,6 +17,7 @@ training:
   checkpoint_every: 1
   log_every: 1
   backbone_train_mode: all
+  mixed_precision: bf16
 tracking:
   enabled: false
   mode: disabled

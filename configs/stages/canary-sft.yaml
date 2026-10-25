@@ -1,10 +1,11 @@
 defaults:
-  - ../canary
-  - _self_
+- ../canary
+- _self_
 training:
   stage: sft
   jepa_loss_weight: 0.5
   max_updates: 600
   backbone_train_mode: all
+  mixed_precision: bf16
 runtime:
   run_name: canary-sft

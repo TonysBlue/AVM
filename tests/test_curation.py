@@ -17,7 +17,6 @@ from data.curation.common import dataset_path, read_jsonl, registry_path, sha256
 from data.curation.manifest import _duration_subset
 from data.curation.prepare import prepare_canary_data
 from data.curation.readiness import check_readiness
-from model.types import SpeechMode
 from runtime.config import DataConfig, ModelConfig, ProjectConfig, load_config
 
 
@@ -80,19 +79,15 @@ def test_canary_manifest_import_has_segment_aware_training_masks(
     manifest = root / "single.jsonl"
 
     manifest.write_text(json.dumps(public_record) + "\n", encoding="utf-8")
-    data = DataConfig()
+    data = DataConfig(video_height=224, video_width=224)
     model = ModelConfig()
     public_episode = next(import_speech_manifest(manifest, data, model))
-    assert not any(bool(unit.speech_codec_mask.item()) for unit in public_episode.units)
-    assert all(unit.speech_mode.item() == SpeechMode.SILENCE for unit in public_episode.units)
+    assert all(unit.speech_codec_mask.all() for unit in public_episode.units)
 
     manifest.write_text(json.dumps(dialogue_record) + "\n", encoding="utf-8")
     dialogue = next(import_speech_manifest(manifest, data, model))
-    modes = [unit.speech_mode.item() for unit in dialogue.units]
-    masks = [bool(unit.speech_codec_mask.item()) for unit in dialogue.units]
-    assert SpeechMode.SPEECH in modes
-    assert SpeechMode.SILENCE in modes
-    assert all(mask == (mode == SpeechMode.SPEECH) for mode, mask in zip(modes, masks, strict=True))
+    assert all(unit.speech_codec_mask.all() for unit in dialogue.units)
+    assert dialogue.target_speech.count_nonzero() > 0
 
 
 def test_manifest_interleaves_supervision_categories_deterministically(tmp_path: Path) -> None:

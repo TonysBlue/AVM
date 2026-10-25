@@ -10,8 +10,7 @@ always take precedence over this document.
 
 AVM (Audio-Video Model without Text) is a research harness for universal realtime
 full-duplex Omni dialogue. Its architecture derives from LatentLoop with the
-action path removed. The model consumes mixed microphone audio, general video
-and time, and directly predicts speech codec tokens. It has no runtime text
+action path removed. The model consumes mixed microphone audio and general video, and directly predicts speech codec tokens. It has no runtime text
 channel, computer control, tool output or video generation. The Harness owns
 audiovisual capture, playback, feedback and session lifecycle. Screen sharing is
 one video source, not a GUI task assumption.
@@ -78,7 +77,7 @@ memory loss。所有优化仍由
 
 The final architecture has three runtime systems and shared packages:
 
-- `Model Core` is pure tensor/model code. It owns the `Z/H/KV` recurrent state,
+- `Model Core` is pure tensor/model code. It owns the `C/H/KV` recurrent state,
   Backbone, Speech Head, and token sampling.
 - `Model Service` is the physical-signal inference boundary. It accepts mixed
   microphone PCM and video pixels/revision with clock metadata; it returns speech PCM.
@@ -118,7 +117,7 @@ stage-specific implementation or fixture fallback is part of a formal run.
   Formal imports and commands use `model`, `data`, `runtime`, `training`,
   `contracts`, `media`, `harness`, and `model-service` workspace boundaries.
 - `packages/data/src/data/curation/`: source locks, manifests, synthesis,
-  audits, Mimi checks, readiness, and encoded shard preparation.
+  audits, native acoustic checks, readiness, and encoded shard preparation.
 - `systems/training/src/training/evaluation.py`: shared validation/test
   evaluation and lineage-bearing reports.
 - `systems/training/src/training/checkpoint.py`: atomic checkpoint save/load
@@ -137,10 +136,18 @@ stage-specific implementation or fixture fallback is part of a formal run.
 
 Do not silently change these invariants:
 
-- Stream clock: one unit is 80 ms, 24 kHz audio, and exactly one Mimi frame.
-- Codec identity: `mimi-24khz-8x2048`, eight codebooks, vocabulary 2048,
+The user-authorized target migration is specified in `docs/minicpm-native-avm.md`:
+MiniCPM-o 4.5 native dimensions, 200 ms / 16 kHz mixed microphone input, five
+25 Hz acoustic tokens on every unit including silence, no speech-mode head,
+native Token2Wav with locked lookahead/tail, and 8 x A800 80 GB training.
+Native source/weight identities and real five-token/silence qualification must
+pass before formal profile activation. The native implementation is the only
+formal code path; unavailable or unqualified assets fail closed.
+
+- Stream clock: one unit is 200 ms, 16 kHz microphone audio, and exactly five native 25 Hz acoustic tokens.
+- Codec identity: `minicpm-o-4_5-s3-25hz`, one codebook, vocabulary 6562 (EOS excluded),
   with the configured revision and weight SHA-256.
-- Context: the formal Canary profile retains 30 seconds (`375` units) of bounded
+- Context: the formal Canary profile retains 30 seconds (`150` units) of bounded
   per-layer KV state. KV is bounded and oldest context is evicted according to
   the model implementation; do not introduce unbounded cache growth.
 - State: recurrent KV, semantic memory slots, per-layer SlowMemory, audio cache, and speech-local state are
@@ -191,12 +198,12 @@ uv run data check-readiness --config configs/canary.yaml
 ```
 
 Real Canary assets must have locked source versions, licenses, archive hashes,
-manifests, audit reports, encoded shards, and Mimi reports. Never fabricate a
+manifests, audit reports, encoded shards, and native acoustic reports. Never fabricate a
 formal asset or silently fall back to a fixture. Fixture data is allowed only for explicit local tests and
 must remain visibly marked as fixture.
 
 Readiness must verify the configured train manifest and shards belong to the
-selected dataset and that Mimi identity and manifest hashes match. Do not
+selected dataset and that native codec identity and manifest hashes match. Do not
 weaken a gate to make a run pass. If a real asset is unavailable, report the
 missing asset and keep the failure explicit.
 
@@ -333,7 +340,7 @@ Add or update tests with behavior changes:
 - recipe tests for stage chaining, run isolation, resume, and incompatible
   checkpoint rejection;
 - readiness tests for missing assets, wrong dataset paths, codec mismatch,
-  failed Mimi segments, and hash mismatch;
+  failed native acoustic segments, and hash mismatch;
 - checkpoint tests for atomic save/load and identity checks;
 - model/training tests for state continuity, TBPTT detach behavior, metrics,
   and gradient accumulation;

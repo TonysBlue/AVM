@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Protocol
@@ -48,9 +49,9 @@ class PlaybackSink(Protocol):
 
 
 class BoundedPlayback:
-    """Playback never blocks capture; silence cancels all pending speech."""
+    """Bounded scheduled PCM playback; only external epoch changes cancel it."""
 
-    def __init__(self, sink: PlaybackSink, capacity: int = 2) -> None:
+    def __init__(self, sink: PlaybackSink, capacity: int = 4) -> None:
         if capacity < 1:
             raise ValueError("playback capacity must be positive")
         self.sink = sink
@@ -61,22 +62,51 @@ class BoundedPlayback:
         self._generation = 0
         self._closed = False
         self._error: BaseException | None = None
+        self._playing = False
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def submit(self, output: ActuationSignal) -> None:
+    def submit(self, output: ActuationSignal, *, wait_for_space: bool = False) -> None:
         with self._condition:
             self.check()
-            if output.speech.silent:
-                self._generation += 1
-                self._pending.clear()
-                with self._sink_lock:
-                    self.sink.interrupt()
-            else:
-                if len(self._pending) >= self._capacity:
+            if output.generation_epoch < self._generation:
+                return
+            if output.generation_epoch > self._generation:
+                self.cancel(output.generation_epoch)
+            if output.speech is None:
+                return
+            if len(self._pending) >= self._capacity:
+                if not wait_for_space or not self._condition.wait_for(
+                    lambda: len(self._pending) < self._capacity or self._error is not None
+                            or self._closed,
+                    timeout=5.0,
+                ):
                     raise RuntimeError("speech playback queue exceeded its latency budget")
-                self._pending.append(output)
-                self._condition.notify()
+                self.check()
+            self._pending.append(output)
+            self._condition.notify_all()
+
+    def cancel(self, epoch: int) -> None:
+        with self._condition:
+            if epoch <= self._generation:
+                return
+            self._generation = epoch
+            self._pending.clear()
+            self._condition.notify_all()
+            with self._sink_lock:
+                self.sink.interrupt()
+
+    def drain(self, timeout: float = 5.0) -> None:
+        with self._condition:
+            if not self._condition.wait_for(
+                lambda: (not self._pending and not self._playing) or self._error is not None,
+                timeout=timeout,
+            ):
+                raise TimeoutError("speech playback did not drain before the session deadline")
+            self.check()
+        with self._sink_lock:
+            if hasattr(self.sink, "drain"):
+                self.sink.drain()
 
     def check(self) -> None:
         if self._error is not None:
@@ -92,12 +122,26 @@ class BoundedPlayback:
                     if self._closed:
                         return
                     output = self._pending.popleft()
+                    self._condition.notify_all()
                     generation = self._generation
+                    self._playing = True
+                    while (output.play_at_ms is not None and not self._closed
+                           and generation == self._generation):
+                        remaining = (output.play_at_ms - time.monotonic() * 1000) / 1000
+                        if remaining <= 0:
+                            break
+                        self._condition.wait(timeout=min(remaining, 0.2))
                 with self._sink_lock:
-                    if generation == self._generation:
+                    if generation == self._generation and not self._closed:
                         self.sink.play(output)
+                with self._condition:
+                    self._playing = False
+                    self._condition.notify_all()
         except BaseException as error:
-            self._error = error
+            with self._condition:
+                self._error = error
+                self._playing = False
+                self._condition.notify_all()
 
     def close(self) -> None:
         with self._condition:
@@ -143,6 +187,16 @@ class DialogueBackend:
         self.playback.check()
         self.next_unit += 1
         return observation, EnvironmentReceipt(output.session_id, output.unit_index, True)
+
+    def flush_speech(self, outputs: list[ActuationSignal]) -> None:
+        for output in outputs:
+            if output.session_id != self.session_id or output.unit_index != self.next_unit:
+                raise ValueError("final speech does not match the lifetime cursor")
+            self.playback.submit(output, wait_for_space=True)
+        self.playback.drain()
+
+    def cancel_speech(self, epoch: int) -> None:
+        self.playback.cancel(epoch)
 
     def close(self) -> None:
         try:

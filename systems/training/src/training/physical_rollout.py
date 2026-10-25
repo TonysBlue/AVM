@@ -1,71 +1,47 @@
-"""Physical lifetime rollout client used by Online Recurrent PPO."""
+"""Physical lifetime rollout through the same continuous speech executor as serving."""
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterable
-from pathlib import Path
 
 import numpy as np
 import torch
-from contracts import (
-    ActuationSignal,
-    EnvironmentReceipt,
-    ObservationSignal,
-    SpeechSignal,
-)
+from contracts import ActuationSignal, EnvironmentReceipt, ObservationSignal
 from harness.transport.control import HarnessControlClient
-from model.types import SpeechMode, StreamUnit
-from runtime.codec_worker import CodecWorkerClient
+from model.types import StreamUnit
 from runtime.config import ProjectConfig
-from runtime.video import video_tensor
+from runtime.continuous_speech import ContinuousSpeechClock, ContinuousSpeechExecutor
+from runtime.native_acoustics import build_native_decoder
+from runtime.video import validate_video_time, video_tensor
 
 
 class PhysicalRolloutClient:
-    """Bridges Model Core token samples to Harness physical signals.
-
-    The Harness never receives token arrays.  Token log-probabilities remain in
-    the training trace while this client decodes speech output at the
-    training-to-environment boundary.
-    """
-
     def __init__(self, config: ProjectConfig) -> None:
-        socket_path = config.training.rl.environment_socket
-        codec_socket = config.training.rl.codec_socket
-        if not socket_path:
-            raise ValueError("Online Recurrent PPO requires training.rl.environment_socket")
-        if not codec_socket:
-            raise ValueError("Online Recurrent PPO requires training.rl.codec_socket")
+        if not config.training.rl.environment_socket:
+            raise ValueError("physical PPO requires a dialogue Harness socket")
         self.config = config
-        self.harness = HarnessControlClient(socket_path)
-        from runtime.codec import CodecIdentity
-
-        self.codec = CodecWorkerClient(
-            Path(codec_socket).expanduser(),
-            CodecIdentity(
-                config.data.codec_id,
-                config.data.codec_weight_hash,
-                config.data.codec_revision,
-                sample_rate=config.data.audio_sample_rate,
-                frame_rate=config.data.codec_frame_rate,
-                frame_samples=config.data.unit_audio_samples,
-                codebooks=config.data.codec_codebooks,
-                codebook_size=config.data.codec_codebook_size,
-            ),
+        self.harness = HarnessControlClient(config.training.rl.environment_socket)
+        decoder = build_native_decoder(config)
+        clock = ContinuousSpeechClock(
+            lookahead_tokens=decoder.lookahead_tokens,
+            vocoder_tail_samples=decoder.tail_samples,
+            playback_delay_ms=config.runtime.playback_delay_ms,
         )
-        self.codec.health()
+        self.executor = ContinuousSpeechExecutor(
+            decoder, clock, vocab_size=config.model.speech_codebook_size
+        )
         self.session_id: str | None = None
-        self.speech_active = False
 
     def identity(self) -> dict[str, str]:
         return self.harness.identity()
 
-    def start_lifetime_session(
-        self, scenario_id: str, seed: int, session_id: str
-    ) -> ObservationSignal:
+    def start_lifetime_session(self, scenario_id: str, seed: int, session_id: str):
         self.session_id = session_id
-        self.codec.reset(session_id, replay=False)
-        self.speech_active = False
-        return self.harness.start_lifetime_session(scenario_id, seed, session_id)
+        self.executor.reset(session_id)
+        observation = self.harness.start_lifetime_session(scenario_id, seed, session_id)
+        validate_video_time(observation, None, self.config.data.video_max_age_ms)
+        return observation
 
     def resume_lifetime_session(
         self,
@@ -73,60 +49,47 @@ class PhysicalRolloutClient:
         expected_next_unit: int,
         *,
         speech_history: Iterable[torch.Tensor] = (),
-    ) -> ObservationSignal:
+    ):
+        observation = self.harness.resume_lifetime_session(session_id, expected_next_unit)
         self.session_id = session_id
-        history = tuple(speech_history)
-        self.codec.restore_decode_history(session_id, history)
-        self.speech_active = bool(history)
-        return self.harness.resume_lifetime_session(session_id, expected_next_unit)
+        self.executor.reset(session_id)
+        stream = self.executor.stream
+        origin = observation.timestamp_ms - expected_next_unit * 200
+        count = 0
+        for index, codes in enumerate(speech_history):
+            timestamp = origin + index * 200
+            stream.push(index, timestamp, codes.reshape(-1).long(), epoch=self.executor.epoch)
+            if stream.next_output_unit < stream.next_input_unit:
+                stream.take(stream.next_output_unit, now_ms=timestamp, epoch=self.executor.epoch)
+            count += 1
+        if count != expected_next_unit:
+            raise ValueError("native speech recovery requires the complete sampled token timeline")
+        return observation
 
-    def actuation(
-        self,
-        observation: ObservationSignal,
-        mode: torch.Tensor,
-        codes: torch.Tensor,
-    ) -> ActuationSignal:
-        selected_mode = int(mode.reshape(-1)[0].item())
-        if selected_mode == int(SpeechMode.SILENCE):
-            self.speech_active = False
-            pcm = np.zeros(self.config.data.unit_audio_samples, dtype=np.float32).tobytes()
-            speech = SpeechSignal(pcm, silent=True)
-        else:
-            if not self.speech_active:
-                self.codec.reset(observation.session_id, replay=False)
-            code_tensor = codes.detach().to("cpu").long().reshape(
-                self.config.model.speech_frames_per_unit, self.config.model.speech_codebooks
-            )
-            decoded = self.codec.decode_step(
-                code_tensor.transpose(0, 1).unsqueeze(0), observation.session_id
-            )
-            values = decoded.detach().cpu().float().reshape(-1).numpy()
-            if values.size != self.config.data.unit_audio_samples:
-                raise RuntimeError("codec decoder returned an invalid speech unit")
-            if not np.isfinite(values).all() or np.max(np.abs(values)) > 1.0:
-                raise RuntimeError("codec decoder returned invalid PCM values")
-            speech = SpeechSignal(values.tobytes())
-            self.speech_active = True
-        return ActuationSignal(observation.session_id, observation.unit_index, speech)
+    def actuation(self, observation: ObservationSignal, codes: torch.Tensor) -> ActuationSignal:
+        elapsed = (time.monotonic() * 1000 - observation.timestamp_ms
+                   if self.config.runtime.clock_kind == "monotonic" else 0.0)
+        return self.executor.step(observation, codes, elapsed_ms=elapsed)
 
     def step(
-        self,
-        observation: ObservationSignal,
-        mode: torch.Tensor,
-        codes: torch.Tensor,
+        self, observation: ObservationSignal, codes: torch.Tensor
     ) -> tuple[ObservationSignal, EnvironmentReceipt, ActuationSignal]:
-        output = self.actuation(observation, mode, codes)
+        output = self.actuation(observation, codes)
         next_observation, receipt = self.harness.apply(output)
+        validate_video_time(next_observation, observation, self.config.data.video_max_age_ms)
         return next_observation, receipt, output
 
     def close(self) -> None:
         if self.session_id is not None:
+            outputs = self.executor.finish()
+            self.harness.flush_speech(self.session_id, outputs)
             self.harness.close(self.session_id)
             self.session_id = None
+        self.executor.close()
 
     def detach(self) -> None:
-        """Disconnect this client without closing the persistent lifetime session."""
         self.session_id = None
+        self.executor.close()
 
 
 def observation_to_stream_unit(observation: ObservationSignal, config: ProjectConfig) -> StreamUnit:
@@ -134,20 +97,19 @@ def observation_to_stream_unit(observation: ObservationSignal, config: ProjectCo
     mic = np.frombuffer(observation.mic.samples, dtype=dtype)
     if dtype == np.int16:
         mic = mic.astype(np.float32) / 32768.0
-    if mic.size != config.data.unit_audio_samples:
-        raise ValueError("physical observation microphone has wrong unit size")
-    if not np.isfinite(mic).all() or np.max(np.abs(mic)) > 1.0:
-        raise ValueError("physical observation microphone PCM is not normalized and finite")
-    video = video_tensor(observation.video)
+    if mic.size != 3200 or not np.isfinite(mic).all() or np.max(np.abs(mic)) > 1:
+        raise ValueError("physical observation must contain normalized 16 kHz / 200 ms PCM")
+    video = video_tensor(
+        observation.video,
+        height=config.data.video_height,
+        width=config.data.video_width,
+        patch_size=config.model.vision_patch_size,
+    )
     return StreamUnit(
         timestamp_ms=torch.tensor([observation.timestamp_ms], dtype=torch.long),
-        delta_ms=torch.tensor([observation.delta_ms], dtype=torch.long),
+        delta_ms=torch.tensor([200], dtype=torch.long),
         mic_audio=torch.from_numpy(mic.copy()).reshape(1, -1),
         video=video,
-        speech_mode=torch.zeros(1, dtype=torch.long),
-        speech_mode_mask=torch.zeros(1, dtype=torch.bool),
-        speech_codes=torch.zeros(
-            1, config.model.speech_frames_per_unit, config.model.speech_codebooks, dtype=torch.long
-        ),
-        speech_codec_mask=torch.zeros(1, config.model.speech_frames_per_unit, dtype=torch.bool),
+        speech_codes=torch.zeros(1, 5, 1, dtype=torch.long),
+        speech_codec_mask=torch.zeros(1, 5, dtype=torch.bool),
     )

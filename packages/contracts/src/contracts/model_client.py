@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import socket
 from pathlib import Path
@@ -72,6 +73,16 @@ class UnixModelServiceClient:
 
     def close_session(self, session_id: str) -> None:
         self._control("close_session", session_id=session_id)
+
+    def finish_session(self, session_id: str) -> list[ActuationSignal]:
+        response = self._control("finish_session", session_id=session_id)
+        return [
+            message_to_actuation(base64.b64decode(value, validate=True))
+            for value in response["actuations"]
+        ]
+
+    def cancel_speech(self, session_id: str) -> int:
+        return int(self._control("cancel_speech", session_id=session_id)["generation_epoch"])
 
     def identity(self) -> dict[str, str]:
         return self._control("identity")["identity"]  # type: ignore[return-value]

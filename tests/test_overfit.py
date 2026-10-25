@@ -6,7 +6,6 @@ from pathlib import Path
 import torch
 from data import SpeechOverfitDataset, write_episode_shards
 from model import StreamingLatentLoop
-from model.types import SpeechMode
 from runtime.config import ProjectConfig
 from training.checkpoint import CheckpointMetadata, file_sha256
 from training.evaluation import evaluate_overfit_checkpoint
@@ -19,14 +18,9 @@ def test_speech_overfit_fixture_has_expected_timeline(
     smoke_config.data.train_episodes = 32
     dataset = SpeechOverfitDataset(smoke_config.data, smoke_config.model)
     episode = dataset.make_episode(9)
-    modes = [int(unit.speech_mode.item()) for unit in episode.units]
     assert len(dataset) == 32
-    assert (
-        modes
-        == [int(SpeechMode.SILENCE)] * 5
-        + [int(SpeechMode.SPEECH)] * 8
-        + [int(SpeechMode.SILENCE)] * 3
-    )
+    assert len(episode.units) == 16
+    assert all(unit.speech_codec_mask.all() for unit in episode.units)
     assert episode.target_speech is not None
     assert episode.target_speech[: 5 * smoke_config.data.unit_audio_samples].count_nonzero() == 0
 

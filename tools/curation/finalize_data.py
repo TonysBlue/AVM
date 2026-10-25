@@ -5,7 +5,7 @@ from pathlib import Path
 
 from data.curation.audit import audit_canary_data
 from data.curation.prepare import (
-    check_mimi_decode,
+    check_native_decode,
     codec_client,
     encode_canary_shards,
 )
@@ -16,14 +16,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--socket", type=Path, required=True)
+    parser.add_argument("--native-source-lock", type=Path)
     args = parser.parse_args()
     config = load_config(args.config)
-    client = codec_client(config, args.socket)
-    client.health()
-    mimi = check_mimi_decode(args.root, dataset="canary", client=client)
-    audit_canary_data(args.root, mimi_report=mimi["path"])
-    encode_canary_shards(args.root, config=config, client=client)
+    with codec_client(config, args.native_source_lock) as client:
+        native = check_native_decode(args.root, dataset="canary", client=client)
+        audit_canary_data(args.root, native_report=native["path"])
+        encode_canary_shards(args.root, config=config, client=client)
 
 
 if __name__ == "__main__":

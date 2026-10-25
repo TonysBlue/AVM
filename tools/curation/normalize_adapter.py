@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import io
 import json
+import math
 import tarfile
 from pathlib import Path
 from typing import Any
@@ -11,8 +12,9 @@ from typing import Any
 import numpy as np
 import pyarrow.parquet as pq
 import soundfile as sf
+from scipy.signal import resample_poly
 
-SAMPLE_RATE = 24_000
+SAMPLE_RATE = 16_000
 TARGET_LUFS = -23.0
 SOURCE_META = {
     "aishell1": {
@@ -65,10 +67,9 @@ def stable_hash(value: Any) -> str:
 def resample(waveform: np.ndarray, source_rate: int) -> np.ndarray:
     if source_rate == SAMPLE_RATE:
         return waveform.astype(np.float32)
-    samples = round(waveform.size * SAMPLE_RATE / source_rate)
-    source = np.arange(waveform.size, dtype=np.float64)
-    target = np.arange(samples, dtype=np.float64) * source_rate / SAMPLE_RATE
-    return np.interp(target, source, waveform).astype(np.float32)
+    divisor = math.gcd(source_rate, SAMPLE_RATE)
+    return resample_poly(waveform, SAMPLE_RATE // divisor,
+                         source_rate // divisor).astype(np.float32)
 
 
 def normalize(waveform: np.ndarray) -> np.ndarray:

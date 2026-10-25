@@ -318,9 +318,10 @@ def _videos(
     recipe = {
         "episode_id": episode_id,
         "ticks": ticks,
-        "tick_ms": 80,
-        "height": 224,
-        "width": 224,
+        "tick_ms": 200,
+        "scale_resolution": 448,
+        "patch_size": 14,
+        "preprocessing": "minicpm-video-overview-v1",
         "fixture": fixture,
         "adapter": video_command,
     }
@@ -775,7 +776,7 @@ def build_canary_manifest(
         video_path = _videos(root, dataset, record["episode_id"], ticks, fixture, video_command)
         record["videos"] = str((root / video_path).resolve())
         record["videos_sha256"] = sha256_file(root / video_path)
-        record["schema_id"] = "avm-episode-v1"
+        record["schema_id"] = "avm-episode-v2"
         if not fixture:
             provenance = read_json((root / video_path).with_suffix(".source.json"))
             if not all(provenance.get(key) for key in (

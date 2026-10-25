@@ -16,7 +16,7 @@ from model_service.transport.server import UnixModelServer
 
 class FakeModelService:
     def identity(self) -> dict[str, str]:
-        return {"service": "fake", "protocol_version": "avm-realtime-v1"}
+        return {"service": "fake", "protocol_version": "avm-realtime-v2"}
 
     def open_session(self, session_id: str) -> str:
         return session_id
@@ -28,7 +28,7 @@ class FakeModelService:
         return ActuationSignal(
             observation.session_id,
             observation.unit_index,
-            SpeechSignal(b"y" * 7680, silent=True),
+            SpeechSignal(b"y" * 19200),
         )
 
 
@@ -46,11 +46,11 @@ def test_model_service_and_harness_use_one_physical_signal_frame(tmp_path) -> No
         "session",
         0,
         0,
-        80,
-        MicSignal(b"x" * 7680),
+        200,
+        MicSignal(b"x" * 12800),
         VideoSignal(b"rgb", 1, 1, captured_at_ms=0, revision=0),
     )
-    assert client.infer(observation).speech.silent
+    assert len(client.infer(observation).speech.pcm) == 19200
     assert client.open_session("session") == "session"
-    assert client.identity()["protocol_version"] == "avm-realtime-v1"
+    assert client.identity()["protocol_version"] == "avm-realtime-v2"
     client.close_session("session")

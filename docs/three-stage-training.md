@@ -1,5 +1,9 @@
 # 统一三阶段训练架构
 
+> 原生接口契约（2026-10-25）：MiniCPM-o 4.5 原生规模、200 ms、16 kHz输入、
+> 连续五声学token、原生Token2Wav、8×A800 80GB。细节见[原生AVM契约](minicpm-native-avm.md)。
+> 正式运行仍要求真实资产、声学资格和数据readiness通过；本地测试不构成8卡性能证据。
+
 > 状态：最终目标训练契约
 > 日期：2026-08-29
 > 关联文档：[实时流多模态 LatentLoop](realtime-multimodal-latent-loop.md) · [Online RL：Online Recurrent PPO 与隔离环境](online-recurrent-ppo-training.md)
@@ -18,7 +22,7 @@ Online RL 的当前正式算法固定为 Online Recurrent PPO。先在本机验�
 实时对话环境、谱系、评测、吞吐和显存闭环；形成证据前不维护更大规模的配置、recipe 或
 资产入口。后续规模设计必须先更新本文、测试契约和资源预算，再添加新 profile。
 
-模型运行时始终只有两个输出头：Speech Head 直接输出 speech mode 与 Mimi codec token；
+模型运行时始终只有两个输出头：Speech Head 直接输出 五个原生声学token；
 Speech Head 是唯一生成输出头；JEPA 保留训练分支。RL 的 Value Head
 是训练专用估值组件，不跨 Model Service 边界，也不承担独立 memory loss。
 三个阶段共享同一个 Perceiver、JEPAHead、Backbone、语义 memory slots `C_t` 和
@@ -35,20 +39,19 @@ Speech Head 是唯一生成输出头；JEPA 保留训练分支。RL 的 Value He
 | SFT | 独立的高质量专家轨迹 | 学习可靠交互、语音响应、视觉指代和全双工轮次策略 |
 | Online RL | 当前 policy 在实时对话环境生命期时间线中的窗口 | 使用 Online Recurrent PPO，按感知 Reward Event、交互质量、延迟、效率和安全反馈优化策略 |
 
-Pretrain/SFT episode 按 80 ms unit 保存。缺失语音标签的 unit 必须设置 speech masks=false；
+Pretrain/SFT episode 按 200 ms unit 保存。缺失语音标签的 unit 必须设置 speech masks=false；
 不得把没有标签伪造成监督静音。连续视频必需，不允许用黑帧补齐缺失资产。
 同理，缺少 speech 标签时必须关闭相应 speech mask。mask 表示监督是否存在，而非
 模型在该时刻应该做什么。
 
 ## 3. Pretrain
 
-Pretrain 使用 teacher forcing 的语音 mode/codec negative log-likelihood：
+Pretrain 使用 teacher forcing 的语音 codec negative log-likelihood：
 
 $$
 \mathcal{L}_{\mathrm{pretrain}}
 = w_{\mathrm{speech}}
-\left(\mathcal{L}_{\mathrm{speech\_mode}}
-{}+ \mathcal{L}_{\mathrm{speech\_codec}}\right)
+\mathcal{L}_{\mathrm{speech\_codec}}
 {}+ \mathcal{L}_{\mathrm{JEPA}}
 $$
 
@@ -116,7 +119,7 @@ $$
 
 ## 6. 当前数据契约
 
-监督 episode 与在线 rollout 统一使用当前数据契约。数据身份固定为 schema_id=avm-episode-v1，旧动作资产不得直接读取。
+监督 episode 与在线 rollout 统一使用当前数据契约。数据身份固定为 schema_id=avm-episode-v2，旧动作资产不得直接读取。
 监督样本 metadata 至少包含：
 
 ```text
@@ -128,7 +131,7 @@ task_id
 environment_id
 environment_version
 protocol_version
-schema_id = avm-episode-v1
+schema_id = avm-episode-v2
 runtime_identity
 ```
 
@@ -141,7 +144,7 @@ payload SHA-256；该 observation 只用于最后一个 source 的 JEPA target�
 
 ## 7. 当前 checkpoint 与阶段谱系
 
-checkpoint 明确使用 model_schema_id=avm-model-v2，metadata 至少包含：
+checkpoint 明确使用 model_schema_id=avm-model-v3，metadata 至少包含：
 
 ```text
 stage
@@ -177,11 +180,11 @@ config hash、严格 state-dict 键与形状、codec/model/data identity 共同�
 | Pretrain updates | 1,000 |
 | SFT updates | 600 |
 | Online RL updates | 400 |
-| model | 192 dim / 8 layers / 8 heads / 768 FFN |
-| parameter count | 11,298,250 |
-| PPO window | 375 units |
+| model | 4096 dim / 36 layers / 32 Q、8 KV heads / 12288 FFN |
+| parameter count | 8,169,568,767 |
+| PPO window | 150 units |
 | active lifetime | 1 |
-| memory / rollout horizon | 375 units |
+| memory / rollout horizon | 150 units |
 
 Canary 是完整训练链的小规模证明，不是删减版算法。它同样使用实时音视频对话环境和
 连续生命期窗口。验收报告必须记录实际数据量、三个阶段的 update/consumed units、

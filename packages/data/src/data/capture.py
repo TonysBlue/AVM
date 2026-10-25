@@ -1,7 +1,7 @@
 """Harness-backed expert capture and append-only session ledgers.
 
 The collector deliberately keeps the physical boundary in Harness.  It accepts
-one expert 80 ms speech PCM frame and records the audiovisual
+one expert 200 ms speech PCM frame and records the audiovisual
 observation/speech/receipt transition.
 No model or privileged environment state is involved.
 """
@@ -28,16 +28,16 @@ from contracts.protocol import (
     payload_to_receipt,
     receipt_to_payload,
 )
-from model.types import Episode, SpeechMode, StreamUnit
+from model.types import Episode, StreamUnit
 from runtime.video import video_tensor
 
 
-def speech_signal_from_base64(value: str, *, silent: bool = False) -> SpeechSignal:
+def speech_signal_from_base64(value: str) -> SpeechSignal:
     try:
         pcm = base64.b64decode(value, validate=True)
     except (ValueError, TypeError) as error:
         raise ValueError("speech PCM base64 is invalid") from error
-    return SpeechSignal(pcm, silent=silent)
+    return SpeechSignal(pcm)
 
 
 def _payload_sha256(payload: bytes) -> str:
@@ -54,7 +54,7 @@ class CaptureTransition:
     receipt_sha256: str
     previous_chain_sha256: str
     chain_sha256: str
-    speech_silent: bool
+    speech_present: bool
     receipt_accepted: bool
 
 
@@ -145,7 +145,7 @@ class CaptureLedger:
                 "session_id": self.session_id,
                 "unit_index": expected,
                 **hashes,
-                "speech_silent": bool(item["speech_silent"]),
+                "speech_present": bool(item["speech_present"]),
                 "receipt_accepted": bool(item["receipt_accepted"]),
             }
             encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
@@ -177,7 +177,7 @@ class CaptureLedger:
                 receipt_sha256=hashes["receipt_sha256"],
                 previous_chain_sha256=self._chain,
                 chain_sha256=chain,
-                speech_silent=bool(item["speech_silent"]),
+                speech_present=bool(item["speech_present"]),
                 receipt_accepted=receipt.accepted,
             )
             self._records.append(record)
@@ -209,8 +209,8 @@ class CaptureLedger:
             raise ValueError("capture session is already started")
         if observation.session_id != self.session_id or observation.unit_index != 0:
             raise ValueError("initial observation identity is invalid")
-        if observation.delta_ms != 80:
-            raise ValueError("capture observation must use the 80 ms physical clock")
+        if observation.delta_ms != 200:
+            raise ValueError("capture observation must use the 200 ms physical clock")
         self._initial = observation
         self._current = observation
         self._write_payload("observation-000000000000.pb", observation_to_payload(observation))
@@ -232,7 +232,7 @@ class CaptureLedger:
         ):
             raise ValueError("next observation identity is not contiguous")
         if (
-            next_observation.delta_ms != 80
+            next_observation.delta_ms != 200
             or next_observation.timestamp_ms <= self._current.timestamp_ms
         ):
             raise ValueError("next observation physical clock is invalid")
@@ -250,7 +250,7 @@ class CaptureLedger:
             "next_observation_sha256": _payload_sha256(next_observation_payload),
             "actuation_sha256": _payload_sha256(actuation_payload),
             "receipt_sha256": _payload_sha256(receipt_payload),
-            "speech_silent": actuation.speech.silent,
+            "speech_present": (actuation.speech is not None),
             "receipt_accepted": receipt.accepted,
         }
         encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
@@ -264,7 +264,7 @@ class CaptureLedger:
             identity["receipt_sha256"],
             self._chain,
             chain,
-            actuation.speech.silent,
+            (actuation.speech is not None),
             receipt.accepted,
         )
         self._write_payload(
@@ -364,10 +364,10 @@ class ExpertCaptureSession:
     def finish(self, metadata: dict[str, Any] | None = None) -> Episode:
         episode = episode_from_capture(self.ledger, metadata=metadata)
         episode.validate(
-            audio_samples=1_920,
-            speech_frames=1,
-            speech_codebooks=8,
-            speech_codebook_size=2_048,
+            audio_samples=3200,
+            speech_frames=5,
+            speech_codebooks=1,
+            speech_codebook_size=6562,
         )
         self.ledger.seal(metadata)
         return episode
@@ -377,8 +377,6 @@ class ExpertCaptureSession:
 
 
 def _speech_waveform(signal: SpeechSignal) -> torch.Tensor:
-    if signal.silent:
-        return torch.zeros(1_920)
     if signal.encoding == "pcm_f32le":
         return torch.from_numpy(np.frombuffer(signal.pcm, dtype="<f4").copy()).float()
     values = np.frombuffer(signal.pcm, dtype="<i2").astype(np.float32) / 32768.0
@@ -401,19 +399,19 @@ def episode_from_capture(
 ) -> Episode:
     initial = ledger.initial_observation
     observations = [initial]
-    speech: list[torch.Tensor] = []
-    speech_active: list[bool] = []
+    speech: dict[int, torch.Tensor] = {}
     for index, _record in enumerate(ledger.records):
         observation_path = ledger.root / f"observation-{index + 1:012d}.pb"
         next_observation = message_to_observation(observation_path.read_bytes())
         actuation = message_to_actuation((ledger.root / f"actuation-{index:012d}.pb").read_bytes())
         observations.append(next_observation)
-        speech.append(_speech_waveform(actuation.speech))
-        speech_active.append(not actuation.speech.silent)
+        if actuation.speech is not None:
+            source_index = actuation.speech_unit_index
+            if source_index in speech:
+                raise ValueError("capture contains duplicate scheduled speech units")
+            speech[source_index] = _speech_waveform(actuation.speech)
     units: list[StreamUnit] = []
-    for _index, (observation, _target, speaking) in enumerate(
-        zip(observations[:-1], speech, speech_active, strict=True)
-    ):
+    for index, observation in enumerate(observations[:-1]):
         video = video_tensor(observation.video)
         units.append(
             StreamUnit(
@@ -421,15 +419,18 @@ def episode_from_capture(
                 delta_ms=torch.tensor([observation.delta_ms]),
                 mic_audio=_mic_waveform(observation),
                 video=video,
-                speech_mode=torch.tensor(
-                    [int(SpeechMode.SPEECH if speaking else SpeechMode.SILENCE)]
-                ),
-                speech_mode_mask=torch.tensor([True]),
-                speech_codes=torch.zeros(1, 1, 8, dtype=torch.long),
-                speech_codec_mask=torch.tensor([[speaking]]),
+                speech_codes=torch.zeros(1, 5, 1, dtype=torch.long),
+                speech_codec_mask=torch.full((1, 5), index in speech, dtype=torch.bool),
             )
         )
-    target_speech = torch.cat(speech) if speech else torch.empty(0)
+    from media.pcm import resample_pcm
+
+    target_pcm = torch.zeros(len(units) * 4800)
+    for index, samples in speech.items():
+        if index is None or not 0 <= index < len(units):
+            raise ValueError("capture speech unit lies outside its observation timeline")
+        target_pcm[index * 4800:(index + 1) * 4800] = samples
+    target_speech = torch.from_numpy(resample_pcm(target_pcm.numpy(), 24000, 16000))
     supplied = metadata or {}
     codec_id = str(supplied.get("codec_id", ""))
     codec_weight_hash = str(supplied.get("codec_weight_hash", ""))
@@ -441,11 +442,11 @@ def episode_from_capture(
     protocol_version = str(supplied.get("protocol_version", ""))
     if not all((environment_id, environment_version, protocol_version)):
         raise ValueError("capture export requires complete Harness identity metadata")
-    if protocol_version != "avm-realtime-v1":
+    if protocol_version != "avm-realtime-v2":
         raise ValueError("capture export protocol identity is incompatible")
     base = {
         "stage": "sft",
-        "schema_id": "avm-episode-v1",
+        "schema_id": "avm-episode-v2",
         "dataset_scale": "canary",
         "sample_kind": "expert_capture",
         "supervision_kind": "speech",
@@ -458,9 +459,9 @@ def episode_from_capture(
             "environment_id": environment_id,
             "environment_version": environment_version,
         },
-        "sample_rate": 24_000,
-        "unit_ms": 80,
-        "codec_frame_rate": 12.5,
+        "sample_rate": 16_000,
+        "unit_ms": 200,
+        "codec_frame_rate": 25.0,
         "codec_id": codec_id,
         "codec_weight_hash": codec_weight_hash,
         "codec_revision": codec_revision,

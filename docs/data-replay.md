@@ -13,7 +13,7 @@ Real video source -> causal VideoSignal -> observation/receipt
 
 ## 时序与控制
 
-每个 80 ms unit 按顺序读取 actuation protobuf，重建 speech，经 Harness `apply` 后等待下一 observation。回放器检查 observation/unit、receipt/unit 连续性；第一个错误 unit 即停止。首版 CLI 支持实时 1x 与 `--non-realtime` 快速回放，不支持暂停、跳转或逐 unit 单步，因为真实设备时间不会随查看器暂停，伪暂停会破坏回流和屏幕时序语义。
+每个 200 ms unit 按顺序读取 actuation protobuf，重建 speech，经 Harness `apply` 后等待下一 observation。回放器检查 observation/unit、receipt/unit 连续性；第一个错误 unit 即停止。首版 CLI 支持实时 1x 与 `--non-realtime` 快速回放，不支持暂停、跳转或逐 unit 单步，因为真实设备时间不会随查看器暂停，伪暂停会破坏回流和屏幕时序语义。
 
 CLI 入口设计为：
 

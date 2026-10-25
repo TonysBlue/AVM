@@ -4,10 +4,10 @@ import base64
 import json
 import socket
 import threading
-from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
+import torch
 from contracts import (
     ActuationSignal,
     EnvironmentReceipt,
@@ -17,55 +17,69 @@ from contracts import (
 )
 from contracts.framing import frame, read_frame
 from runtime.codec import CodecIdentity
-from runtime.codec_worker import receive_message, send_message
 from runtime.config import ProjectConfig
+from runtime.native_acoustics import NativeAcousticServer
 
 
 class CodecWorker:
     def __init__(self, path: Path, identity: CodecIdentity) -> None:
         self.path = path
-        self.identity = identity
-        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.server.bind(str(path))
-        self.server.listen(16)
-        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.server = NativeAcousticServer(ProtocolAcousticDecoder(identity), path)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
-
-    def _serve(self) -> None:
-        while True:
-            try:
-                connection, _ = self.server.accept()
-            except OSError:
-                return
-            with connection:
-                try:
-                    header, payload = receive_message(connection)
-                except ConnectionError:
-                    return
-                operation = header["operation"]
-                if operation == "health":
-                    send_message(connection, {"ok": True, "identity": asdict(self.identity)})
-                elif operation == "reset":
-                    send_message(connection, {"ok": True})
-                elif operation == "decode_step":
-                    codes = np.frombuffer(payload, dtype=np.uint16)
-                    values = np.zeros(self.identity.frame_samples, dtype=np.float32)
-                    values += float(codes.sum() % 3) / 10
-                    send_message(
-                        connection,
-                        {"ok": True, "dtype": "float32", "shape": [1, self.identity.frame_samples]},
-                        values.tobytes(),
-                    )
-                else:
-                    send_message(connection, {"ok": False, "error": "unsupported"})
+        import time
+        for _ in range(100):
+            if path.exists():
+                break
+            time.sleep(0.01)
 
     def close(self) -> None:
         self.server.close()
-        try:
-            socket.socket(socket.AF_UNIX, socket.SOCK_STREAM).connect(str(self.path))
-        except OSError:
-            pass
         self.thread.join(timeout=1)
+
+
+class ProtocolAcousticDecoder:
+    """Explicit test-only timing protocol; provides no acoustic quality evidence."""
+
+    lookahead_tokens = 3
+    tail_samples = 3840
+
+    def __init__(self, identity: CodecIdentity) -> None:
+        self.vocab_size = identity.codebook_size
+        self.identity = {
+            "acoustic_protocol_id": "avm-native-acoustics-v1",
+            "codec_id": identity.codec_id,
+            "codec_revision": identity.revision,
+            "codec_weight_sha256": identity.weight_sha256,
+            "source_lock_sha256": "synthetic",
+            "vocab_size": self.vocab_size,
+            "lookahead_tokens": self.lookahead_tokens,
+            "tail_samples": self.tail_samples,
+            "target_encoding_context": {"kind": "explicit-test-fixture"},
+        }
+        self.reset()
+
+    def reset(self) -> None:
+        self.started = False
+
+    def synchronize(self) -> None:
+        pass
+
+    def encode(self, waveform: torch.Tensor) -> torch.Tensor:
+        return torch.arange(waveform.numel() // 640) % (self.vocab_size - 1)
+
+    def decode(self, tokens: list[int], *, final: bool) -> torch.Tensor:
+        count = len(tokens) if final else len(tokens) - self.lookahead_tokens
+        samples = count * 960
+        if final and self.started:
+            samples += self.tail_samples
+        elif not final and not self.started:
+            samples -= self.tail_samples
+        self.started = True
+        return torch.full((samples,), 0.01)
+
+    def close(self) -> None:
+        pass
 
 
 class PhysicalBackend:
@@ -83,8 +97,8 @@ class PhysicalBackend:
             session_id,
             0,
             0,
-            80,
-            MicSignal(np.zeros(1920, dtype=np.float32).tobytes()),
+            200,
+            MicSignal(np.zeros(3200, dtype=np.float32).tobytes()),
             VideoSignal(b"x" * (224 * 224 * 3), 224, 224, captured_at_ms=0, revision=0),
         )
 
@@ -97,16 +111,24 @@ class PhysicalBackend:
             ObservationSignal(
                 output.session_id,
                 output.unit_index + 1,
-                (output.unit_index + 1) * 80,
-                80,
-                MicSignal(np.zeros(1920, dtype=np.float32).tobytes()),
-                VideoSignal(b"x" * (224 * 224 * 3), 224, 224, captured_at_ms=0, revision=0),
+                (output.unit_index + 1) * 200,
+                200,
+                MicSignal(np.zeros(3200, dtype=np.float32).tobytes()),
+                VideoSignal(b"x" * (224 * 224 * 3), 224, 224,
+                            captured_at_ms=(output.unit_index + 1) * 200,
+                            revision=output.unit_index + 1),
             ),
             receipt,
         )
 
     def close(self) -> None:
         return None
+
+    def flush_speech(self, outputs: list[ActuationSignal]) -> None:
+        self.seen.extend(outputs)
+
+    def cancel_speech(self, generation_epoch: int) -> None:
+        pass
 
 
 class RewardWorker:

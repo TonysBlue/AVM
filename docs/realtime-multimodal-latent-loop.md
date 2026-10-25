@@ -1,5 +1,9 @@
 # AVM 实时全双工音视频模型完整方案（基于 LatentLoop）
 
+> 原生接口契约（2026-10-25）：MiniCPM-o 4.5 原生规模、200 ms、16 kHz输入、
+> 连续五声学token、原生Token2Wav、8×A800 80GB。细节见[原生AVM契约](minicpm-native-avm.md)。
+> 正式运行仍要求真实资产、声学资格和数据readiness通过；本地测试不构成8卡性能证据。
+
 > 状态：项目顶层最终架构文档
 > 日期：2026-10-24
 > 目标：构建持续接收混合音频与通用视频、直接生成语音的实时全双工 Omni 对话模型。
@@ -14,7 +18,7 @@
 当前正式模型使用 Backbone 内的共享语义 memory slots `C_t`，替代外部
 `WorldStateUpdate/Z_t`。`H_t` 是当前工作状态，`C_t` 是跨 unit 保存的语义状态；
 `C_t` 不直接连接 Speech/Value/JEPA heads，只通过下一 unit 的 Backbone
-影响 `H_t`。每层 RecentKV 保留最近 375 units 的精确历史，过期 KV 经过 surprise
+影响 `H_t`。每层 RecentKV 保留最近 150 units 的精确历史，过期 KV 经过 surprise
 gate 和 Delta/KDA 更新写入固定容量 SlowMemory。
 
 ```text
@@ -42,7 +46,7 @@ $$
 $$
 
 `RecentKV` 是短期精确上下文；`SlowMemory` 是每层固定容量的长期关联摘要；`C_t`
-是共享语义/认知状态。SlowMemory 不是完整 softmax attention 的严格等价替代，375
+是共享语义/认知状态。SlowMemory 不是完整 softmax attention 的严格等价替代，150
 unit 窗口内仍保持 RecentKV 精确语义。
 
 ### 1.1 系统边界
@@ -97,29 +101,28 @@ $$
 ### 3.2 通用视频视觉输入
 
 模型接收一路通用视频，可来自摄像头、视频流或屏幕共享。物理帧携带采集时间和
-revision，适配器缩放为 224×224 RGB 后进入模型。每 unit 使用最新因果帧；
+revision，适配器保持画幅比例并按原生patch规则缩放后进入模型。每 unit 使用最新因果帧；
 低帧率复用最近帧，缺失首帧等待，断连或超时显式失败，不合成黑帧。
 
 ### 3.3 直接语音输出
 
-Speech Head 直接预测 Mimi codec token：
+Speech Head每200 ms从完整H生成五个有效原生声学token，包括静音：
 
-~~~
-H_t + speech_local_(t-1)
-    -> speech mode
-    -> Mimi codec frame
-    -> frozen causal codec decoder
-    -> 1920-sample waveform
-    -> playback
-~~~
+```text
+H_t [B,64,4096] -> 原生semantic projector -> [B,64,768]
+    -> 原生20层Llama decoder -> 5个25 Hz codes
+    -> Token2Wav（前瞻3、留尾160 ms）-> 连续24 kHz PCM
+    -> 累计4800 samples -> 携带计划时间交给Harness播放
+```
 
-每 80 ms unit 输出 SILENCE 或 SPEECH。SILENCE 不生成 codec token，也不调用 codec decoder。
+没有SILENCE/SPEECH分类头、EOS停止、VAD播放gate或全零PCM回退。
+保守固定播放延迟为600 ms，PCM就绪即提前交付，由Harness等待计划时间。
 
 ### 3.4 输出范围与架构来源
 
 AVM 不包含电脑动作输出。本节保留 LatentLoop 迁移边界：旧 ActionFrame、
 ControlSignal、action-local state 以及 GUI 执行环境均退出当前协议。
-唯一生成输出是直接语音；静默由 Speech Head 的 SILENCE 表达。
+唯一生成输出是直接语音；静默由连续声学token表达。
 
 ### 3.5 文本旁路边界
 
@@ -132,7 +135,7 @@ ControlSignal、action-local state 以及 GUI 执行环境均退出当前协议�
 | 符号 | 含义 |
 |---|---|
 | $O_t$ | 当前混合音频和视频观测 |
-| $P_t$ | $\mathrm{Perceiver}(O_t)$ 的 16 个多模态 slots |
+| $P_t$ | $\mathrm{Perceiver}(O_t)$ 的64个多模态slots |
 | $\widehat{P}_{t+1\mid t}$ | JEPAHead 对下一时刻 Perceiver slots 的预测 |
 | $\mathrm{RecentKV}_t$ | 有界逐层 Transformer Key/Value Cache |
 | $\mathrm{SlowMemory}_t$ | 每层固定容量长期关联摘要 |
@@ -142,8 +145,8 @@ ControlSignal、action-local state 以及 GUI 执行环境均退出当前协议�
 
 ### 4.1 KV Cache
 
-每层 KV 保存最近进入主干的 16 个 Perceiver slots。缓存按完整 unit 追加和淘汰，
-不能在 unit 中间截断。Canary 上限为 375 个 80 ms unit，即每层 6,000 tokens、30 秒。
+每层 KV 保存最近进入主干的 64个Perceiver slots。缓存按完整 unit 追加和淘汰，
+不能在 unit 中间截断。Canary 上限为 150 个 200 ms unit，即每层 9,600 tokens、30 秒。
 语义 memory slots 不作为额外 token 直接写入 KV。超过精确窗口的完整 unit KV 才写入
 SlowMemory。
 
@@ -176,7 +179,7 @@ $$
 ### 4.4 完整 H_t
 
 $$
-H_t\in\mathbb R^{B\times 16\times d_{model}}
+H_t\in\mathbb R^{B\times 64\times d_{model}}
 $$
 
 $H_t$ 是当前 unit 的完整主干输出，而不是单个 query 或 pooled summary。它必须保存在
@@ -205,7 +208,7 @@ episode/session 开始时：
 ~~~
 timestamp_ms       [B] int64
 delta_ms           [B] int64
-mic_audio          [B, 1920] float32
+mic_audio          [B, 3200] float32
 video             [B, 3, 224, 224] float32
 ~~~
 
@@ -213,48 +216,42 @@ delta_ms 必须为正，时间戳严格递增。
 
 ### 5.2 Perceiver 输入与输出
 
-音频和视觉 stem 先组织为带模态与位置编码的输入序列：
-
-~~~
-<AUDIO_0> ... <AUDIO_N>
-<VISION_0> ... <VISION_15>
-~~~
-
-16 个 learned Perceiver queries 通过两层 `slot-to-input cross-attention -> slot
-self-attention -> FFN` 将该序列压缩为 `[B,16,model_dim]` 的 P_t。视觉 stem 仍输出
-4x4 空间特征，但 Perceiver slots 是混合模态高层表示，不再与视觉位置一一对应。所有
-观测必须经过 Perceiver，原始 stem token 不得绕过它进入 Backbone。静态和动态视频每个
-unit 都走同一条编码路径。
+每unit音频为两个4096维token，视觉每切片由原生resampler输出64个4096维token。
+两类模态embedding进入同一个两层Perceiver：内部2048维、16 heads、FFN8192，64个
+learned queries，输出`P_t=[B,64,4096]`。全部观测通过它进入主干，静态与动态视频共享路径。
+多切片沿显式S轴输入；实时视频使用保持宽高比的原生overview预处理。
 
 ### 5.3 Codec 时间对齐
 
-~~~
-sample_rate          24000 Hz
-unit_ms              80
-audio_samples/unit   1920
-codec_frame_rate     12.5 Hz
-codec_frames/unit    1
-codebooks            8
-vocabulary           2048
-~~~
+```text
+input_sample_rate     16000 Hz mono
+unit_ms               200
+input_samples/unit    3200
+codec_frame_rate      25 Hz
+codec_frames/unit     5
+codebooks             1
+vocabulary            6562（EOS 6561禁止采样）
+output_sample_rate    24000 Hz mono
+output_samples/unit   4800
+```
 
-音频和 codec 时间轴必须严格对应，不能累计四舍五入。
+目标整段连续编码后每五token分组；固定参考前缀及其裁剪规则写入source-lock，不能逐块编码。
 
 ### 5.4 多频率调度
 
-采集器可以高频采集音频和视频，编码器可以使用内部帧率，但主干状态转移和输出协议统一在 80 ms unit 上。背压不得合并模型 unit 或增大 delta_ms；队列有界，超时显式失败并记录 telemetry。
+采集器可以高频采集音频和视频，编码器可以使用内部帧率，但主干状态转移和输出协议统一在 200 ms unit 上。背压不得合并模型 unit 或增大 delta_ms；队列有界，超时显式失败并记录 telemetry。
 
 ### 5.5 固定节拍与时间元数据
 
-模型只接收混合麦克风音频和视频，不接收时间信号。每步固定为 80 ms，时序由连续
+模型只接收混合麦克风音频和视频，不接收时间信号。每步固定为 200 ms，时序由连续
 unit、顺序位置和循环状态表达。没有时间 token、时间编码器或时间模态 embedding。
 `timestamp_ms`、`delta_ms` 和视频采集时间仅为传输、轨迹与训练元数据，用于排序、
 对齐、延迟审计及 PPO 时间折扣；进入感知编码器前构造仅含音视频的输入对象。
 
 测试契约：相同音视频和循环状态在不同合法时间元数据下产生相同感知表示和模型输出；
 模型参数及配置不含时间分支；原有时钟校验、视频新鲜度及 PPO 时间折扣仍有效。
-音频/视觉模态 embedding 为两类，Perceiver 保持 16 slots。模型 schema 更新为
-`avm-model-v2`，旧 checkpoint 明确拒绝，不自动迁移权重。
+音频/视觉模态 embedding 为两类，Perceiver保持64 slots。模型 schema 更新为
+`avm-model-v3`，旧 checkpoint 明确拒绝，不自动迁移权重。
 
 ## 6. 模型架构
 
@@ -268,20 +265,24 @@ H_(t-1), C_(t-1), RecentKV_(t-1), SlowMemory_(t-1)
                                       |             |
                                Speech Head
                                       |             |
-                             Mimi waveform
+                             原生Token2Wav PCM
                                       |
                                       +--> JEPAHead --> P_hat_(t+1|t)
 ```
 
 ### 6.1 流式音频编码器
 
-音频编码器增量处理新增采样并保留 audio_cache。它只接收混合麦克风，不接收播放参考或来源标签。
+保留原生24层1024维Whisper参数、16 heads和FFN4096。16 kHz PCM采用400点窗、160点
+hop、240点历史，20个新mel帧经有历史缓存的原生卷积得到10个新位置。原生MLP投影到
+4096维并pool5，得到两个新token。音频层KV有界，正弦位置超过原生1500位置按解析公式
+延伸，不在chunk边界reset。因果相位相对原生居中前端约22.5 ms滞后，属于适配训练契约。
 
 ### 6.2 视觉编码器
 
-视频帧统一归一化为 [B,3,224,224]，视觉编码器生成 4×4 空间 token，
-加入位置表示后进入 Perceiver。视觉 token 不旁路连接输出；Speech Head 读取融合后的完整 H_t。
-同音频不同视频的任务用于检查模型是否使用视觉，避免语音目标与视频无关。
+保留原生SigLIP2的27层、1152维、16 heads、FFN4304、patch14和70×70位置表。
+视频overview保持画幅比例，约448²面积并按patch取整，用PIL bicubic缩放，再归一化到
+[-1,1]；方形帧有1024个patch。原生64-query resampler输出4096维token，随后进入
+Perceiver。同音频不同视频的任务用于检查视觉使用情况。
 
 ### 6.3 多模态主干
 
@@ -301,7 +302,7 @@ RecentKV；固定数量的 C 只跨 unit 持久化，不写入 RecentKV。
 
 ### 6.4 JEPAHead 与单参数 JEPA
 
-JEPAHead 只读取当前 $H_t$，以固定 slot 顺序预测一个 80 ms 后的 Perceiver 表示：
+JEPAHead 只读取当前 $H_t$，以固定 slot 顺序预测一个 200 ms 后的 Perceiver 表示：
 
 $$
 \widehat{P}_{t+1\mid t} = \mathrm{JEPAHead}(H_t)
@@ -395,31 +396,24 @@ future Speech loss
 
 ### 8.1 Speech Head
 
-Speech Head 使用 H_t 的当前输出位置和 speech_local：
-
-~~~
-H_t + speech_local_(t-1)
-    -> speech mode logits
-    -> causal/factorized codec logits
-    -> generated codes
-~~~
-
-Speech mode 为 SILENCE 或 SPEECH。SPEECH unit 预测一帧 8-codebook Mimi token；SILENCE unit 的 codec mask 为 false。
+保留原生4096→768→768 semantic MLP、L2 normalization、20层768维Llama、12 heads、
+FFN3072、声学embedding和weight-normalized输出头。每unit追加64个条件、五个声学code，
+严格因果预测。teacher forcing与采样消费相同的第五个code并保持相同KV顺序。
+语音局部窗口按完整条件/code组裁剪，首轮使用10组（2秒）；C/H认知状态不随之重置。
 
 ### 8.2 Codec 契约
 
 | 字段 | 值 |
 |---|---|
-| Codec | Mimi |
-| 采样率 | 24 kHz mono |
-| 帧率 | 12.5 Hz |
-| 帧长 | 80 ms / 1920 samples |
-| Codebook | 8 |
-| Vocab | 2048 |
-| Revision | 配置锁定 |
-| Weight SHA-256 | 配置锁定 |
+| Codec | `minicpm-o-4_5-s3-25hz` |
+| tokenizer输入 / PCM输出 | 16 kHz / 24 kHz mono |
+| 帧率 / 每unit数量 | 25 Hz / 5 |
+| Codebook / Vocab | 1 / 6562（最后EOS排除） |
+| Revision | `eb4141de24550a3a1a4082f718be58f46b761728` |
+| Tokenizer SHA-256 | `d43342aa12163a80bf07bffb94c9de2e120a8df2f9917cd2f642e7f4219c6f71` |
 
-Mimi decoder 是冻结的声学解码器，不是 TTS。
+Token2Wav为冻结的原生flow/HiFT资产，运行时不经过文本。前瞻、留尾、音色参考、运行时
+代码和推理精度都以source-lock审计，五token不保证单次底层调用恰好返回4800 samples。
 
 ### 8.3 环境自听
 
@@ -441,8 +435,8 @@ $$
 
 ### 9.2 持续采集与播放
 
-音频与视频使用持续采集线程，不等待模型完成发声。每 80 ms 形成一条物理 observation。
-播放独立消费语音 PCM，队列默认最多 2 units；静音清除待播放内容并中断播放设备。
+音频与视频使用持续采集线程，不等待模型完成发声。每 200 ms 形成一条物理 observation。
+播放按单调时钟消费计划PCM，队列有界；只有外部cancel增加epoch并清理旧输出。
 采集 backlog 默认最多 3 units，超出预算报错，不静默丢音频或重置模型状态。
 
 ### 9.3 正式部署
@@ -454,9 +448,9 @@ mixed_audio_source 必须包含对端音频与模型播放回流；只读单路�
 ## 10. 并发输出
 
 全双工意味着模型发声时仍更新 H、C、KV、SlowMemory 与音频状态。
-用户插话后的新观察可以改变下一 unit 的语音 mode，静音取消未播放语音；
+用户插话后的新观察改变下一unit的声学token；模型自主静默经过既定输出延迟，外部cancel可清空队列。
 模型持续听看并决定恢复回应，不使用录完一轮再生成一轮的串行流程。
-停止延迟包括采集、模型推理、codec、播放缓冲，必须测量而非仅由 80 ms 时钟推断。
+停止延迟包括采集、模型推理、codec、播放缓冲，必须测量而非仅由 200 ms 时钟推断。
 
 ## 11. 完整状态转移
 
@@ -520,7 +514,7 @@ $$
 = \mathrm{CURRENT\_SLOTS}[t-\mathrm{kv\_units}+1:t]
 $$
 
-Canary 上下文为 375 units（30 秒），每个 unit 固定 16 个 slots。KV 按完整 unit 淘汰，
+Canary 上下文为 150 units（30 秒），每个unit固定64个slots。KV 按完整 unit 淘汰，
 保留后的 token 仍按原始时间顺序参与 causal attention。
 
 ### 12.2 语义 memory 和 SlowMemory 读取
@@ -541,7 +535,7 @@ unit cursor。会话持久化必须记录当前 model、codec 和 model identity
 ~~~
 Audio Capture       音频环形缓冲
 Screen Capture      每 unit 完整视频帧
-Perceiver           音频/视觉 stem 与 16-slot 感知编码
+Perceiver           音频/视觉 stem 与64-slot感知编码
 Backbone Worker     Backbone、C/RecentKV/SlowMemory 状态
 Speech Worker       codec frame 和播放块
 Telemetry           延迟、队列、状态和轨迹
@@ -549,14 +543,15 @@ Telemetry           延迟、队列、状态和轨迹
 
 ### 13.2 单 GPU 调度
 
-递归模型、C、RecentKV、SlowMemory、audio cache 和两个 local state 留在同一个 GPU
-进程。Ray 只负责外围 CPU 任务，不逐 unit 搬运状态。
+递归模型由一个进程管理；推理的C/H/RecentKV/SlowMemory/audio/speech-local驻留policy卡。
+训练按层分配到8卡或5卡，状态跟随对应层，tensor copy保留梯度；声学worker使用专用卡。
+Ray只负责外围CPU任务。完整资源分配、FP32参数/BF16计算与边界测试见原生AVM契约。
 
 ### 13.3 背压
 
 当计算延迟超过实时 tick：
 
-- 音频保持每块 80 ms，队列有界，溢出或超时显式失败；
+- 音频保持每块 200 ms，队列有界，溢出或超时显式失败；
 - 视觉按 unit 输入当前完整帧；低帧率复用最近因果帧，超时报错并记录 telemetry；
 - 超时、取消和紧急停止优先级最高；
 - 任何丢帧、时间跳跃或 worker 错误都写入 telemetry。
@@ -579,8 +574,8 @@ runtime_events     播放、执行、丢帧和延迟审计
 
 当前 WebDataset episode 由 `meta.json`、`mic.flac`、
 `target_speech.flac`、`video.npz`、`timeline.npz`、`speech_codes.npy` 和
-`turns.json` 组成；timeline 保存 speech mode/mask、codec mask 和时间戳。
-metadata 使用 schema_id=avm-episode-v1，runtime 使用 avm-realtime-v1。
+`turns.json` 组成；timeline 保存 codec mask 和时间戳。
+metadata 使用 schema_id=avm-episode-v2，runtime 使用 avm-realtime-v2。
 旧动作时间线、controls.npy 和 memory target 不属于 AVM；receipt/reward 仅用于原始
 采集或在线训练审计，不进入监督样本输入。完整字段见
 `docs/data/trajectory-schema.md`。
@@ -611,22 +606,21 @@ metadata 使用 schema_id=avm-episode-v1，runtime 使用 avm-realtime-v1。
 ### 15.1 Speech loss
 
 $$
-\mathcal{L}_{\mathrm{speech}}
-= \mathcal{L}_{\mathrm{speech\_mode}}
-{}+ \mathcal{L}_{\mathrm{speech\_codec}}
+\mathcal{L}_{\mathrm{speech}} = \mathcal{L}_{\mathrm{speech\_codec}}
 $$
 
-mode loss 对有效 SILENCE/SPEECH 标签计算 CE；codec loss 只对 SPEECH unit 的有效 Mimi frame/codebook 计算 CE。
+有效词表内五个声学token的CE覆盖讲话、停顿和静音；只有缺失标签屏蔽监督。
+同一EOS约束用于采样、CE、PPO old/reference概率和评估。
 
 ### 15.2 行为监督范围
 
 AVM 删除动作监督，不计算动作 loss，也不将缺失动作标签改为占位目标。
-mode CE 和有效 codec CE 构成唯一行为监督；JEPA 保持既有单参数时序。
+五token有效codec CE构成唯一行为监督；JEPA 保持既有单参数时序。
 
 ### 15.3 并发输出
 
-mode 和 codec 共享主干梯度。SILENCE 只监督 mode，SPEECH 监督 mode 与有效 codec。
-缺少语音标签的 unit 不产生虚假静音目标，但仍按 episode 连续推进状态。
+所有有效声学token共享主干梯度，静音也保留完整五token监督。
+缺少标签的unit不伪造静音目标，但仍按episode连续推进状态。
 
 ### 15.4 长期记忆监督
 
@@ -682,7 +676,7 @@ Pretrain、SFT 和 Online RL 分别使用 1.0、0.5 和两路 0.1 的 JEPA 系�
 
 | 模块 | 直接梯度 | 主要行为影响 |
 |---|---|---|
-| Speech Head | Speech mode/codec loss | 语音 mode、codec 准确率和局部连续性 |
+| Speech Head | Speech codec loss | codec准确率、静音保真和局部连续性 |
 | Perceiver | Speech/RL、JEPA source loss | 当前多模态观察表示 |
 | JEPAHead | JEPA loss | 单步未来表示预测 |
 | Backbone | Speech/RL loss | 共享多模态理解和输出条件表示 |
@@ -708,10 +702,10 @@ Pretrain、SFT 和 Online RL 分别使用 1.0、0.5 和两路 0.1 的 JEPA 系�
 和监督 horizon 内历史状态传播。rematerialization 只重算激活，不截断这个 horizon；
 梯度只在明确的 horizon 边界 detach，不能在每个 unit 或重计算分段重置状态。
 
-正式训练把 375-unit horizon 划分为若干 rematerialization segment。每段前向只保留段末
+正式训练把 150-unit horizon 划分为若干 rematerialization segment。每段前向只保留段末
 完整 recurrent state，以及各 unit 计算 Speech/JEPA/PPO 所必需的轻量输出张量；
 段内逐步 H/C/RecentKV/SlowMemory 状态不进入持久输出列表，反向时从段首状态整段重放。
-segment 边界保持 autograd 连接，因此分段大小只影响显存与重算量，不改变 375-unit 监督语义。
+segment 边界保持 autograd 连接，因此分段大小只影响显存与重算量，不改变 150-unit 监督语义。
 
 ### 16.4 外部执行边界
 
@@ -721,8 +715,8 @@ segment 边界保持 autograd 连接，因此分段大小只影响显存与重�
 
 1. Canary 是唯一正式规模，使用公共训练入口和状态协议；后续规模另行设计。
 2. 所有训练 episode 按时间顺序处理，不能每个窗口重置状态。
-3. 正式 Canary 的 memory horizon 和 TBPTT 为 375 units。
-4. 所有 targets 配套 mask；缺失标签屏蔽对应 loss，不伪造 NOOP 或 SILENCE。
+3. 正式 Canary 的 memory horizon 和 TBPTT 为 150 units。
+4. 所有 targets 配套 mask；缺失标签屏蔽对应 loss，不伪造缺失目标。
 5. 未来输出 loss 必须能够在 TBPTT 范围内回传到早期 C/SlowMemory 更新。
 6. 训练、验证、推理和恢复共享同一 forward_step 语义。
 7. codec、model schema、trajectory schema、unit 时钟和 checkpoint identity 必须一致。
@@ -732,7 +726,7 @@ segment 边界保持 autograd 连接，因此分段大小只影响显存与重�
 ```text
 state = initial_state()
 
-for each 80 ms observation O_t:
+for each 200 ms observation O_t:
     P_t = Perceiver(O_t)
     H_t, C_t, RecentKV_t, SlowMemory_t = Backbone(
         P_t, state.H, state.C, state.RecentKV, state.SlowMemory
@@ -740,7 +734,7 @@ for each 80 ms observation O_t:
     P_hat = JEPAHead(H_t)
     speech_t = SpeechHead(H_t, state.speech_local)
 
-    submit speech_t to codec/playback if mode=SPEECH
+    append exactly five valid acoustic tokens to continuous Token2Wav
     submit speech PCM to bounded Harness playback
 
     state = {
@@ -753,14 +747,14 @@ for each 80 ms observation O_t:
 ```
 
 输出产生的真实音频通过播放回流进入后续 unit；视频持续反映当前情境。
-Speech Head 每 unit 决定 SPEECH 或 SILENCE，不依赖外部轮次状态机。
+Speech Head每unit生成五个含静音的有效声学token，不依赖外部轮次状态机。
 
 ## 19. MiniCPM 系基础实现
 
 MiniCPM 或同类多模态主干可以提供视觉编码、音频编码、Perceiver stems、因果 Backbone
 和增量 KV。项目必须在此基础上保持：
 
-1. 固定 80 ms unit；
+1. 固定 200 ms unit；
 2. 完整 H_t 暂存；
 3. Backbone 内持久化 $C_t$，每层持久化固定容量 SlowMemory；
 4. 独立 Speech Head；
@@ -777,12 +771,12 @@ MiniCPM 或同类多模态主干可以提供视觉编码、音频编码、Percei
 - model_dim、层数、heads 和 FFN；
 - perceiver_slots、semantic_memory_slots、kv_units、kv_window_ms；
 - audio sample rate、unit_ms、video shape；
-- Mimi codec identity；
-- model_schema_id、coordinate_grid_size、type_bytes_per_unit、hotkey_keys_per_unit；
+- 原生声学 codec identity；
+- model_schema_id、source-lock hash、目标编码上下文、qualification hash；
 - tbptt_units、memory_horizon_units、mixed precision；
 - loss weights、checkpoint cadence、manifest 和 run identity。
 
-Canary 的正式 horizon 为 375 units。正式 GPU capacity smoke 必须保持 Canary 的模型形状、
+Canary 的正式 horizon 为 150 units。正式 GPU capacity smoke 必须保持 Canary 的模型形状、
 RecentKV、TBPTT 和 memory horizon；只有快速 CPU 单元测试 fixture 可以缩小这些数值，且不构成
 Canary 容量证据。
 
@@ -796,14 +790,14 @@ Canary 容量证据。
 | 有界 RecentKV + C + SlowMemory | 核心长期记忆方案 |
 | 长 KV 对照 | 精确历史上界 |
 | 核心方案去掉完整 H 暂存 | 验证完整 hidden 的必要性 |
-| 核心方案去掉 Speech codec mask | 验证 SILENCE 语义 |
+| 核心方案去掉缺失监督mask | 验证真实标签覆盖率 |
 
 ### 21.2 语音指标
 
 - mode accuracy；
 - speech-active fraction；
 - 每个 codebook accuracy；
-- SILENCE 误触发率；
+- 静音重建RMS、误发声率与说停延迟；
 - codec RTF、首块延迟和长语音连续性；
 - 帧漂移、NaN、削波和播放队列积压；
 - 自声回流、噪声和重叠条件下的稳定性。
@@ -840,7 +834,7 @@ Canary 容量证据。
 | slots 同质化 | learned slot identity、行为消融和容量监控 |
 | 声学回流导致重复响应 | 回流延迟/音量/缺失随机化、重复行为评测 |
 | 用户插话导致状态错乱 | 真实混合音频、严格 unit 顺序和完整 H 暂存 |
-| 动态画面导致动作滞后 | 连续视觉流训练、80 ms unit 时序和运动任务评测 |
+| 动态画面导致动作滞后 | 连续视觉流训练、200 ms unit 时序和运动任务评测 |
 | 单卡吞吐跟不上 | 音频合并、视觉降频、activation checkpoint、显式背压 |
 | 长时间队列增长 | 有界队列、超时、取消和实时 telemetry |
 | 隐状态难审计 | 完整轨迹、checkpoint lineage 和紧急停止 |
@@ -863,7 +857,7 @@ Harness 拥有设备采集与播放生命周期，Model Service 无电脑控制�
 ## 25. 成功标准
 
 1. 模型可以持续处理一路混合麦克风和视频流。
-2. Speech Head 以 80 ms 对齐生成 SILENCE/SPEECH 和 Mimi codec。
+2. Speech Head以200 ms对齐生成五个原生声学token，静音也经Token2Wav重建。
 3. 自声回流、用户插话、噪声和屏幕变化不会破坏状态顺序。
 4. 有界 RecentKV、固定 C 和 SlowMemory 的容量不随运行时长无限增长。
 5. C/SlowMemory on/off 对跨窗口目标、约束和错误恢复产生可测差异。

@@ -29,9 +29,7 @@ class ReplayEvent:
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
     ]
 
 
@@ -49,7 +47,7 @@ def replay_capture(
 ) -> list[ReplayEvent]:
     """Apply recorded speech through Harness without loading a model."""
 
-    harness.start_lifetime_session(scenario_id, seed, session_id)
+    initial = harness.start_lifetime_session(scenario_id, seed, session_id)
     if on_started is not None:
         on_started()
     events: list[ReplayEvent] = []
@@ -62,8 +60,16 @@ def replay_capture(
             pcm = base64.b64decode(speech_b64, validate=True)
         except (ValueError, TypeError) as error:
             raise ValueError(f"replay unit {index} speech PCM is invalid") from error
-        speech = SpeechSignal(pcm, silent=bool(transition.get("speech_silent", False)))
-        output = ActuationSignal(session_id, index, speech)
+        speech = SpeechSignal(pcm) if pcm else None
+        offset = transition.get("playback_offset_ms")
+        output = ActuationSignal(
+            session_id,
+            index,
+            speech,
+            transition.get("speech_unit_index") if speech else None,
+            initial.timestamp_ms + int(offset) if offset is not None else None,
+            int(transition.get("generation_epoch", 0)),
+        )
         observation, receipt = harness.apply(output)
         if observation.unit_index != index + 1 or receipt.unit_index != index:
             raise RuntimeError(f"replay unit {index} returned a non-contiguous result")
@@ -82,7 +88,7 @@ def replay_capture(
         if on_event is not None:
             on_event(event)
         if realtime:
-            target = (index + 1) * 80.0
+            target = (index + 1) * 200.0
             delay = target - elapsed
             if delay > 0:
                 time.sleep(delay / 1000.0)
@@ -155,21 +161,25 @@ def replay_episode(
     ):
         raise ValueError("replay Harness identity does not match the episode")
     frame_samples = data_config.unit_audio_samples
-    if frame_samples != 1_920:
-        raise ValueError("Harness replay requires the physical 1920-sample 80 ms audio clock")
+    if frame_samples != 3200:
+        raise ValueError("Harness replay requires the 16 kHz / 200 ms microphone clock")
+    from media.pcm import resample_pcm
+
+    waveform = torch.from_numpy(resample_pcm(selected.target_speech.cpu().numpy(), 16000, 24000))
     prepared: list[dict[str, Any]] = []
     for index, unit in enumerate(selected.units):
-        start = index * frame_samples
-        pcm = selected.target_speech[start : start + frame_samples]
-        if pcm.numel() < frame_samples:
-            pcm = torch.nn.functional.pad(pcm, (0, frame_samples - pcm.numel()))
+        start = index * 4800
+        pcm = waveform[start : start + 4800]
+        if pcm.numel() != 4800:
+            raise ValueError("replay target waveform does not cover the complete timeline")
         prepared.append(
             {
                 "unit_index": index,
                 "speech_pcm_b64": base64.b64encode(
                     pcm.detach().cpu().float().numpy().tobytes()
-                ).decode(),
-                "speech_silent": not bool(unit.speech_codec_mask.any()),
+                ).decode()
+                if bool(unit.speech_codec_mask.all())
+                else "",
             }
         )
     try:
@@ -219,14 +229,22 @@ def replay_ledger(
     ledger_root = ledger.root
     prepared: list[dict[str, Any]] = []
     for index, _record in enumerate(ledger.records):
-        actuation = message_to_actuation(
-            (ledger_root / f"actuation-{index:012d}.pb").read_bytes()
-        )
+        actuation = message_to_actuation((ledger_root / f"actuation-{index:012d}.pb").read_bytes())
         prepared.append(
             {
                 "unit_index": index,
-                "speech_pcm_b64": base64.b64encode(actuation.speech.pcm).decode(),
-                "speech_silent": actuation.speech.silent,
+                "speech_pcm_b64": (
+                    base64.b64encode(actuation.speech.pcm).decode()
+                    if actuation.speech is not None
+                    else ""
+                ),
+                "speech_unit_index": actuation.speech_unit_index,
+                "playback_offset_ms": (
+                    actuation.play_at_ms - ledger.initial_observation.timestamp_ms
+                    if actuation.play_at_ms is not None
+                    else None
+                ),
+                "generation_epoch": actuation.generation_epoch,
             }
         )
     try:

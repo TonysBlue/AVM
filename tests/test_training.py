@@ -71,7 +71,6 @@ def test_recurrent_rematerialization_matches_direct_unroll(
             unit,
             direct_state,
             unit.speech_codes,
-            speech_teacher_mode=unit.speech_mode,
         )
         direct_outputs.append(output)
         direct_state = output.state
@@ -107,9 +106,6 @@ def test_recurrent_rematerialization_matches_direct_unroll(
     for direct_output, rematerialized_output in zip(
         direct_outputs, rematerialized_outputs, strict=True
     ):
-        assert torch.equal(
-            direct_output.speech_mode_logits, rematerialized_output.speech_mode_logits
-        )
         assert torch.equal(
             direct_output.speech_codec_logits, rematerialized_output.speech_codec_logits
         )

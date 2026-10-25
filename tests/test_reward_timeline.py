@@ -15,8 +15,8 @@ from data import ObservationTimeline
 
 def _observation(unit: int) -> ObservationSignal:
     return ObservationSignal(
-        "session", unit, unit * 80, 80,
-        MicSignal(b"x" * 7680),
+        "session", unit, unit * 200, 200,
+        MicSignal(b"x" * 12800),
         VideoSignal(b"x" * (224 * 224 * 3), 224, 224, captured_at_ms=0, revision=0),
     )
 

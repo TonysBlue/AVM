@@ -46,6 +46,19 @@ def _read_exact(process: subprocess.Popen[bytes], size: int) -> bytes:
     return bytes(result)
 
 
+def _read_video_frame(process: subprocess.Popen[bytes]) -> tuple[bytes, int, int]:
+    assert process.stdout is not None
+    if process.stdout.readline(8) != b"P6\n":
+        raise ValueError("capture requires binary RGB PPM frames")
+    dimensions = process.stdout.readline(64).split()
+    if len(dimensions) != 2 or process.stdout.readline(8) != b"255\n":
+        raise ValueError("capture PPM header is invalid")
+    width, height = (int(value) for value in dimensions)
+    if min(width, height) < 1 or width * height > 8_388_608:
+        raise ValueError("capture frame exceeds the physical signal budget")
+    return _read_exact(process, width * height * 3), width, height
+
+
 class FFmpegSensor:
     def __init__(self, config: Mapping[str, Any]) -> None:
         self.config = config
@@ -89,16 +102,16 @@ class FFmpegSensor:
             args += ["-re", "-i", str(Path(source).expanduser()) if "://" not in source else source]
         else:
             raise ValueError("video_kind must be camera, video or screen")
-        video = self._spawn(args + ["-an", "-vf", "scale=224:224", "-pix_fmt", "rgb24",
-                                    "-f", "rawvideo", "pipe:1"])
-        self._origin = time.monotonic()
+        video = self._spawn(args + ["-an", "-vf", "fps=5,scale='min(1280,iw)':-2",
+                                    "-pix_fmt", "rgb24", "-vcodec", "ppm",
+                                    "-f", "image2pipe", "pipe:1"])
 
         def capture_video() -> None:
             revision = 0
             try:
                 while not self._closed.is_set():
-                    image = _read_exact(video, 224 * 224 * 3)
-                    self._video.append(VideoSignal(image, 224, 224, self._now(), revision))
+                    image, width, height = _read_video_frame(video)
+                    self._video.append(VideoSignal(image, width, height, self._now(), revision))
                     revision += 1
                     self._video_ready.set()
             except BaseException as error:
@@ -116,7 +129,7 @@ class FFmpegSensor:
         if not audio_source:
             raise ValueError("mixed_audio_source must include peer audio and playback feedback")
         audio = self._spawn([ffmpeg, "-nostdin", "-loglevel", "error", "-f", "pulse",
-                             "-i", audio_source, "-ar", "24000", "-ac", "1",
+                             "-i", audio_source, "-ar", "16000", "-ac", "1",
                              "-f", "f32le", "pipe:1"])
 
         def capture_audio() -> None:
@@ -124,15 +137,15 @@ class FFmpegSensor:
             anchor: int | None = None
             try:
                 while not self._closed.is_set():
-                    pcm = _read_exact(audio, 1920 * 4)
+                    pcm = _read_exact(audio, 3200 * 4)
                     if anchor is None:
                         anchor = self._now()
-                    timestamp = anchor + unit * 80
+                    timestamp = anchor + unit * 200
                     delay = (timestamp - self._now()) / 1000
                     if delay > 0 and self._closed.wait(delay):
                         return
                     observation = ObservationSignal(
-                        session_id, unit, timestamp, 80, MicSignal(pcm), self._video.at(timestamp)
+                        session_id, unit, timestamp, 200, MicSignal(pcm), self._video.at(timestamp)
                     )
                     enqueue_observation(self._observations, observation)
                     unit += 1
@@ -145,7 +158,7 @@ class FFmpegSensor:
         thread.start()
 
     def _now(self) -> int:
-        return int((time.monotonic() - self._origin) * 1000)
+        return int(time.monotonic() * 1000)
 
     def _check(self) -> None:
         if self._error is not None:
@@ -180,12 +193,14 @@ class PulsePlayback:
         self.process: subprocess.Popen[bytes] | None = None
 
     def play(self, output: ActuationSignal) -> None:
+        if output.speech is None:
+            raise ValueError("playback requires an actual PCM packet")
         if output.speech.encoding != "pcm_f32le":
             raise ValueError("Pulse playback requires float32 speech")
         if self.process is None:
             self.process = subprocess.Popen(
                 [self.binary, "--playback", "--raw", "--format=float32le", "--rate=24000",
-                 "--channels=1", "--latency-msec=80", f"--device={self.sink}"],
+                 "--channels=1", "--latency-msec=40", f"--device={self.sink}"],
                 stdin=subprocess.PIPE, stderr=subprocess.DEVNULL,
             )
             assert self.process.stdin is not None
@@ -209,12 +224,22 @@ class PulsePlayback:
         process, self.process = self.process, None
         _stop(process)
 
+    def drain(self) -> None:
+        process = self.process
+        if process is None:
+            return
+        if process.stdin is not None:
+            process.stdin.close()
+        if process.wait(timeout=5) != 0:
+            raise RuntimeError("PulseAudio failed while draining final speech")
+        self.process = None
+
     def close(self) -> None:
         self.interrupt()
 
 
 def create_backend(config: Mapping[str, Any]) -> DialogueBackend:
-    if config.get("protocol_version") != "avm-realtime-v1":
+    if config.get("protocol_version") != "avm-realtime-v2":
         raise ValueError("Harness requires the AVM physical protocol")
     if not config.get("scenarios") or not config.get("mixed_audio_source"):
         raise ValueError("real dialogue scenarios and mixed_audio_source must be configured")

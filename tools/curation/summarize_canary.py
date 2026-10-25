@@ -44,7 +44,7 @@ def prepare_summary(root: Path) -> None:
 def encode_summary(root: Path) -> None:
     reports = dataset_path(root, "canary", "reports")
     benchmark = read_json(reports / "codec-benchmark.json")
-    mimi = read_json(reports / "mimi-decode.json")
+    native = read_json(reports / "native-decode.json")
     audit = read_json(reports / "audit.json")
     encoded = read_json(reports / "encoded.json")
     readiness = read_json(reports / "readiness.json")
@@ -56,8 +56,8 @@ def encode_summary(root: Path) -> None:
     line("Decode speed", f"RTF {metrics['rtf']:.3f}, p95 {metrics['p95_frame_ms']:.2f} ms")
     line(
         "Decode checks",
-        f"{mimi['checked_segments'] - mimi['failed_segments']} passed, "
-        f"{mimi['failed_segments']} failed",
+        f"{native['checked_segments'] - native['failed_segments']} passed, "
+        f"{native['failed_segments']} failed",
     )
     line("Dataset", f"{audit['episodes']} episodes, {audit['duration_seconds'] / 60:.1f} minutes")
     line("Splits", splits)

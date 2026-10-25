@@ -4,11 +4,8 @@ import argparse
 import hashlib
 import json
 import sys
-from dataclasses import asdict
 from pathlib import Path
 
-import torch
-from media import benchmark_decoder
 from model import StreamingLatentLoop
 from runtime.config import load_config
 
@@ -41,8 +38,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="data")
     subparsers = parser.add_subparsers(dest="command", required=True)
     config_commands = {
-        "generate-data", "build-overfit-data", "validate-data", "encode-speech",
-        "import-speech", "benchmark-codec", "inspect-model",
+        "generate-data",
+        "build-overfit-data",
+        "validate-data",
+        "encode-speech",
+        "import-speech",
+        "inspect-model",
     }
     for name in config_commands:
         command = subparsers.add_parser(name)
@@ -54,13 +55,17 @@ def main(argv: list[str] | None = None) -> int:
     subparsers.choices["validate-data"].add_argument("--shards")
     subparsers.choices["encode-speech"].add_argument("--shards")
     subparsers.choices["encode-speech"].add_argument("--output", required=True)
-    subparsers.choices["encode-speech"].add_argument("--socket", required=True)
+    subparsers.choices["encode-speech"].add_argument("--native-source-lock")
     subparsers.choices["import-speech"].add_argument("--manifest", required=True)
     subparsers.choices["import-speech"].add_argument("--output", required=True)
-    subparsers.choices["benchmark-codec"].add_argument("--socket", required=True)
-    subparsers.choices["benchmark-codec"].add_argument("--frames", type=int, default=250)
-    subparsers.choices["benchmark-codec"].add_argument("--report")
     subparsers.choices["inspect-model"].add_argument("--report")
+    native_assets = subparsers.add_parser("inspect-native-assets")
+    native_assets.add_argument("--source-lock", required=True)
+    native_assets.add_argument("--acoustic-only", action="store_true")
+    native_speech = subparsers.add_parser("qualify-native-speech")
+    native_speech.add_argument("--source-lock", required=True)
+    native_speech.add_argument("--corpus", required=True)
+    native_speech.add_argument("--output", required=True)
     capture = subparsers.add_parser("capture")
     capture.add_argument("--config", required=True)
     capture.add_argument("--harness-socket", required=True)
@@ -99,13 +104,17 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--model-sha256")
     prepare.add_argument("--normalize-command")
     prepare.add_argument("--video-command")
-    prepare.add_argument("--socket")
+    prepare.add_argument("--native-source-lock")
     prepare.add_argument("--encode", action="store_true")
-    prepare.add_argument("--mimi-report-dir")
+    prepare.add_argument("--native-report-dir")
     prepare.add_argument("--fixture", action="store_true")
     for name in (
-        "fetch-canary-data", "select-canary-voices", "build-canary-text",
-        "synthesize-canary", "build-canary-manifest", "audit-canary-data",
+        "fetch-canary-data",
+        "select-canary-voices",
+        "build-canary-text",
+        "synthesize-canary",
+        "build-canary-manifest",
+        "audit-canary-data",
     ):
         command = subparsers.add_parser(name)
         command.add_argument("--config", required=True)
@@ -121,20 +130,31 @@ def main(argv: list[str] | None = None) -> int:
     subparsers.choices["synthesize-canary"].add_argument("--model-sha256")
     subparsers.choices["build-canary-manifest"].add_argument("--normalize-command")
     subparsers.choices["build-canary-manifest"].add_argument("--video-command")
-    subparsers.choices["audit-canary-data"].add_argument("--mimi-report")
+    subparsers.choices["audit-canary-data"].add_argument("--native-report")
     args = parser.parse_args(argv)
+    if args.command in {"inspect-native-assets", "qualify-native-speech"}:
+        try:
+            if args.command == "inspect-native-assets":
+                from data.curation.native_assets import audit_native_assets
+
+                report = audit_native_assets(args.source_lock, model_weights=not args.acoustic_only)
+            else:
+                from data.curation.native_speech import qualify_native_speech
+
+                report = qualify_native_speech(args.source_lock, args.corpus, args.output)
+        except (OSError, ValueError, RuntimeError) as error:
+            print(json.dumps({"passed": False, "error": str(error)}), file=sys.stderr)
+            return 2
+        print(json.dumps(report, indent=2))
+        return 0 if report["passed"] else 2
     if args.command == "capture":
         from harness.transport.control import HarnessControlClient
 
         config = load_config(args.config)
         client = HarnessControlClient(args.harness_socket)
         harness_identity = client.identity()
-        ledger = CaptureLedger(
-            args.ledger, session_id=args.session_id, lineage_id=args.lineage_id
-        )
-        session = ExpertCaptureSession(
-            client, ledger, seed=args.seed, scenario_id=args.scenario
-        )
+        ledger = CaptureLedger(args.ledger, session_id=args.session_id, lineage_id=args.lineage_id)
+        session = ExpertCaptureSession(client, ledger, seed=args.seed, scenario_id=args.scenario)
         source = sys.stdin
         try:
             session.start()
@@ -149,7 +169,6 @@ def main(argv: list[str] | None = None) -> int:
                 event = json.loads(line)
                 speech = speech_signal_from_base64(
                     str(event.get("speech_pcm_b64", "")),
-                    silent=bool(event.get("speech_silent", False)),
                 )
                 session.step(speech)
             episode = session.finish(
@@ -163,9 +182,7 @@ def main(argv: list[str] | None = None) -> int:
                     "redistribution_allowed": False,
                     "split": args.split,
                     "task_id": args.task_id,
-                    "session_id_hash": hashlib.sha256(
-                        args.session_id.encode()
-                    ).hexdigest(),
+                    "session_id_hash": hashlib.sha256(args.session_id.encode()).hexdigest(),
                     "device_id_hash": hashlib.sha256(
                         harness_identity["environment_id"].encode()
                     ).hexdigest(),
@@ -252,21 +269,28 @@ def main(argv: list[str] | None = None) -> int:
             model_sha256=args.model_sha256,
             normalize_command=args.normalize_command,
             video_command=args.video_command,
-            socket_path=args.socket,
+            native_source_lock=args.native_source_lock,
             encode=args.encode,
-            mimi_report_dir=args.mimi_report_dir,
+            native_report_dir=args.native_report_dir,
         )
         print(json.dumps(report, indent=2, default=str))
     elif args.command in {
-        "fetch-canary-data", "select-canary-voices", "build-canary-text", "synthesize-canary",
-        "build-canary-manifest", "audit-canary-data",
+        "fetch-canary-data",
+        "select-canary-voices",
+        "build-canary-text",
+        "synthesize-canary",
+        "build-canary-manifest",
+        "audit-canary-data",
     }:
         config = load_config(args.config)
         root = args.root or config.runtime.data_root
         if args.command == "fetch-canary-data":
             report = fetch_canary_data(
-                root, fixture=args.fixture, lock_path=args.lock,
-                download=args.download, extract=args.extract,
+                root,
+                fixture=args.fixture,
+                lock_path=args.lock,
+                download=args.download,
+                extract=args.extract,
             )
         elif args.command == "select-canary-voices":
             report = select_canary_voices(root, library=args.library, fixture=args.fixture)
@@ -274,22 +298,26 @@ def main(argv: list[str] | None = None) -> int:
             report = build_canary_text(root, fixture=args.fixture, seed=args.seed)
         elif args.command == "synthesize-canary":
             report = synthesize_canary(
-                root, fixture=args.fixture,
-                synth_command=args.synth_command, asr_command=args.asr_command,
+                root,
+                fixture=args.fixture,
+                synth_command=args.synth_command,
+                asr_command=args.asr_command,
                 model_sha256=args.model_sha256,
             )
         elif args.command == "build-canary-manifest":
             report = build_canary_manifest(
-                root, fixture=args.fixture,
-                normalize_command=args.normalize_command, video_command=args.video_command,
+                root,
+                fixture=args.fixture,
+                normalize_command=args.normalize_command,
+                video_command=args.video_command,
             )
         else:
-            report = audit_canary_data(root, fixture=args.fixture, mimi_report=args.mimi_report)
+            report = audit_canary_data(root, fixture=args.fixture, native_report=args.native_report)
         print(json.dumps(report, indent=2, default=str))
     else:
         config = load_config(args.config, args.overrides)
         if args.command == "inspect-model":
-            model = StreamingLatentLoop(config.model)
+            model = StreamingLatentLoop(config.model, load_native=False)
             report = {
                 "parameters": model.parameter_count(),
                 "tokens_per_unit": config.model.tokens_per_unit,
@@ -297,6 +325,7 @@ def main(argv: list[str] | None = None) -> int:
                 "perceiver_layers": config.model.perceiver_layers,
                 "jepa_layers": config.model.jepa_layers,
                 "max_kv_tokens": config.model.kv_units * config.model.perceiver_slots,
+                "weights_loaded": False,
             }
         elif args.command == "generate-data":
             output = args.output or str(config.runtime.data_path() / "generated" / "train-%06d.tar")
@@ -335,37 +364,21 @@ def main(argv: list[str] | None = None) -> int:
             source = args.shards or config.data.shards
             if not source:
                 raise ValueError("provide --shards or configure data.shards")
-            client = codec_client(config, args.socket)
-            client.health()
-            manifest = write_episode_shards(
-                encode_target_speech(
-                    EpisodeShardReader(
-                        source,
-                        config.data,
-                        config.model,
-                        require_encoded_speech=False,
-                        validate_manifest=False,
+            with codec_client(config, args.native_source_lock) as client:
+                manifest = write_episode_shards(
+                    encode_target_speech(
+                        EpisodeShardReader(
+                            source,
+                            config.data,
+                            config.model,
+                            require_encoded_speech=False,
+                            validate_manifest=False,
+                        ),
+                        client,
                     ),
-                    client,
-                ),
-                args.output,
-            )
-            report = {"episodes": len(manifest), "output": args.output}
-        elif args.command == "benchmark-codec":
-            client = codec_client(config, args.socket)
-            health = client.health()
-            generator = torch.Generator().manual_seed(config.data.seed)
-            codes = torch.randint(
-                config.data.codec_codebook_size,
-                (args.frames, config.data.codec_codebooks, 1),
-                generator=generator,
-            )
-            result = benchmark_decoder(client, codes)
-            report = {"health": health, "benchmark": asdict(result)}
-            if args.report:
-                Path(args.report).expanduser().write_text(
-                    json.dumps(report, indent=2) + "\n", encoding="utf-8"
+                    args.output,
                 )
+            report = {"episodes": len(manifest), "output": args.output}
         else:
             raise ValueError(f"unknown data command: {args.command}")
         print(json.dumps(report, indent=2, default=str))

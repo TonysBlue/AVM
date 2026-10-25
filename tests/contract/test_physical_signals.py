@@ -30,8 +30,8 @@ def test_observation_physical_signal_round_trip() -> None:
         "session",
         0,
         0,
-        80,
-        MicSignal(b"x" * 7680),
+        200,
+        MicSignal(b"x" * 12800),
         VideoSignal(b"rgb", 1, 1, captured_at_ms=0, revision=0),
     )
     restored = message_to_observation(observation_to_message(value))
@@ -47,7 +47,7 @@ def test_actuation_does_not_contain_raw_action_tokens() -> None:
     value = ActuationSignal(
         "session",
         0,
-        SpeechSignal(b"x" * 7680, silent=True),
+        SpeechSignal(b"x" * 19200),
     )
     restored = message_to_actuation(actuation_to_message(value))
     assert restored == value
@@ -56,8 +56,8 @@ def test_actuation_does_not_contain_raw_action_tokens() -> None:
 
 
 def test_physical_signal_rejects_wrong_audio_clock() -> None:
-    with pytest.raises(ValueError, match="24 kHz"):
-        MicSignal(b"x", sample_rate_hz=16_000)
+    with pytest.raises(ValueError, match="16 kHz"):
+        MicSignal(b"x", sample_rate_hz=24_000)
 
 
 def test_receipt_protobuf_round_trip() -> None:

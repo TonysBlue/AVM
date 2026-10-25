@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import math
-
 import torch
 from torch import Tensor, nn
 
@@ -56,87 +54,3 @@ class SlowMemory(nn.Module):
         matrix = matrix + gate * torch.einsum("bhqd,bhqe->bhde", keys, error)
         normalizer = normalizer + gate.squeeze(-1) * keys.sum(dim=2)
         return SlowMemoryState(matrix.to(state.matrix.dtype), normalizer.to(state.normalizer.dtype))
-
-
-class CachedSelfAttention(nn.Module):
-    def __init__(self, dim: int, heads: int, dropout: float) -> None:
-        super().__init__()
-        self.heads = heads
-        self.head_dim = dim // heads
-        self.qkv = nn.Linear(dim, 3 * dim, bias=False)
-        self.out = nn.Linear(dim, dim, bias=False)
-        self.dropout = dropout
-
-    def forward(
-        self,
-        x: Tensor,
-        cache: LayerKV,
-        max_tokens: int,
-        cache_tokens: int,
-    ) -> tuple[Tensor, LayerKV, LayerKV]:
-        batch, current_tokens, dim = x.shape
-        qkv = self.qkv(x).view(batch, current_tokens, 3, self.heads, self.head_dim)
-        query, key, value = qkv.unbind(dim=2)
-        query = query.transpose(1, 2)
-        key = key.transpose(1, 2)
-        value = value.transpose(1, 2)
-
-        attention_key = torch.cat((cache.key, key), dim=2)
-        attention_value = torch.cat((cache.value, value), dim=2)
-        scores = torch.matmul(query, attention_key.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        weights = torch.softmax(scores.float(), dim=-1).to(scores.dtype)
-        weights = torch.dropout(weights, self.dropout, self.training)
-        output = (
-            torch.matmul(weights, attention_value)
-            .transpose(1, 2)
-            .reshape(batch, current_tokens, dim)
-        )
-
-        all_key = torch.cat((cache.key, key[:, :, :cache_tokens]), dim=2)
-        all_value = torch.cat((cache.value, value[:, :, :cache_tokens]), dim=2)
-        new_cache = LayerKV(
-            key=all_key[:, :, -max_tokens:],
-            value=all_value[:, :, -max_tokens:],
-        )
-        evicted = LayerKV(
-            key=all_key[:, :, :-max_tokens], value=all_value[:, :, :-max_tokens]
-        )
-        return self.out(output), new_cache, evicted
-
-
-class StreamingTransformerLayer(nn.Module):
-    def __init__(
-        self, dim: int, heads: int, ffn_dim: int, dropout: float
-    ) -> None:
-        super().__init__()
-        self.self_norm = nn.LayerNorm(dim)
-        self.self_attention = CachedSelfAttention(dim, heads, dropout)
-        self.ffn_norm = nn.LayerNorm(dim)
-        self.ffn = nn.Sequential(
-            nn.Linear(dim, ffn_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(ffn_dim, dim),
-        )
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(
-        self,
-        hidden: Tensor,
-        cache: LayerKV,
-        max_tokens: int,
-        cache_tokens: int,
-        slow_memory: SlowMemory,
-        slow_state: SlowMemoryState,
-    ) -> tuple[Tensor, LayerKV, SlowMemoryState]:
-        attended, new_cache, evicted = self.self_attention(
-            self.self_norm(hidden),
-            cache,
-            max_tokens,
-            cache_tokens,
-        )
-        slow_context = slow_memory.read(self.self_norm(hidden), slow_state)
-        attended = attended + slow_context
-        hidden = hidden + self.dropout(attended)
-        hidden = hidden + self.dropout(self.ffn(self.ffn_norm(hidden)))
-        return hidden, new_cache, slow_memory.write(slow_state, evicted)

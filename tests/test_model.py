@@ -31,12 +31,12 @@ def test_recurrent_state_is_bounded_and_heads_receive_gradients(
         smoke_config.model.model_dim,
     )
     total.backward()
-    assert model.audio_encoder.conv.weight.grad is not None
-    assert model.vision_encoder.encoder[0].weight.grad is not None
+    assert model.audio_encoder.encoder.conv1.weight.grad is not None
+    assert model.vision_encoder.encoder.embeddings.patch_embedding.weight.grad is not None
     assert model.semantic_slot_identity.grad is not None
     assert model.slow_memories[0].write_gate.weight.grad is not None
-    assert model.speech_head.depth_embeddings[0].weight.grad is not None
-    assert model.speech_head.mode.weight.grad is not None
+    assert model.speech_head.emb_code[0].weight.grad is not None
+    assert not any("speech_head.mode" in name for name, _ in model.named_parameters())
     assert output.perceiver_slots.shape == (1, 16, smoke_config.model.model_dim)
     assert output.jepa_prediction.shape == output.perceiver_slots.shape
     assert output.value.shape == (1,)
@@ -86,7 +86,7 @@ def test_activation_checkpointing_supports_backward(smoke_config: ProjectConfig)
 
     compute_losses(output, unit)["total"].backward()
 
-    assert model.layers[0].self_attention.qkv.weight.grad is not None
+    assert model.layers[0].self_attn.q_proj.weight.grad is not None
 
 
 def test_speech_loss_averages_over_valid_codec_tokens(smoke_config: ProjectConfig) -> None:
@@ -94,11 +94,10 @@ def test_speech_loss_averages_over_valid_codec_tokens(smoke_config: ProjectConfi
     unit = SyntheticEpisodeDataset(smoke_config.data, smoke_config.model).make_episode(0).units[0]
     output = model(unit.observation, model.initial_state(1, "cpu"), unit.speech_codes)
     output.speech_codec_logits = torch.zeros_like(output.speech_codec_logits)
-    output.speech_mode_logits = torch.zeros_like(output.speech_mode_logits)
 
     speech_loss = compute_losses(output, unit)["speech"]
 
-    expected = math.log(smoke_config.model.speech_codebook_size) + math.log(2)
+    expected = math.log(smoke_config.model.speech_codebook_size - 1)
     assert torch.isclose(speech_loss, torch.tensor(expected), atol=1e-4)
 
 

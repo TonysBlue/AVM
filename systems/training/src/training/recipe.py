@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 import os
 import pickle
@@ -110,11 +111,7 @@ def _checkpoint_matches(path: Path, config: ProjectConfig) -> bool:
             == config.data.codec_weight_hash
             and payload.get("metadata", {}).get("stage") == config.training.stage
             and payload.get("metadata", {}).get("algorithm")
-            == (
-                config.training.rl.algorithm
-                if config.training.stage == "rl"
-                else None
-            )
+            == (config.training.rl.algorithm if config.training.stage == "rl" else None)
             and "objective" not in payload.get("metadata", {})
         )
     except (OSError, RuntimeError, ValueError, KeyError, TypeError, pickle.UnpicklingError):
@@ -152,9 +149,7 @@ def _require_parent_stage(path: Path, *, stage: str) -> None:
         payload = torch.load(path, map_location="cpu", weights_only=False)
     except (OSError, RuntimeError, ValueError, TypeError) as error:
         raise ValueError(f"cannot inspect parent checkpoint {path}: {error}") from error
-    if not isinstance(payload.get("model"), dict) or not isinstance(
-        payload.get("metadata"), dict
-    ):
+    if not isinstance(payload.get("model"), dict) or not isinstance(payload.get("metadata"), dict):
         raise ValueError("formal stage parent checkpoint is incomplete")
     metadata = payload.get("metadata", {})
     if (
@@ -281,6 +276,8 @@ def run_recipe(
             required_parent = "pretrain" if stage.name == "sft" else "sft"
             _require_parent_stage(Path(init_from), stage=required_parent)
         result = train(config, resume=resume, init_from=init_from)
+        result.pop("model", None)
+        gc.collect()
         final_checkpoint = _checkpoint_path(config, result["train_state"]["update"])
         stage_report: dict[str, Any] = {
             "recipe": recipe.name,

@@ -1,17 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import IntEnum
 from typing import Any
 
 import torch
 from torch import Tensor
 from torch.utils import _pytree
-
-
-class SpeechMode(IntEnum):
-    SILENCE = 0
-    SPEECH = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,8 +24,6 @@ class StreamUnit:
     delta_ms: Tensor
     mic_audio: Tensor
     video: Tensor
-    speech_mode: Tensor
-    speech_mode_mask: Tensor
     speech_codes: Tensor
     speech_codec_mask: Tensor
 
@@ -53,8 +45,6 @@ class StreamUnit:
             delta_ms=self.delta_ms.to(device),
             mic_audio=self.mic_audio.to(device=device, dtype=dtype),
             video=self.video.to(device=device, dtype=dtype),
-            speech_mode=self.speech_mode.to(device),
-            speech_mode_mask=self.speech_mode_mask.to(device),
             speech_codes=self.speech_codes.to(device),
             speech_codec_mask=self.speech_codec_mask.to(device),
         )
@@ -71,19 +61,17 @@ class StreamUnit:
         batch = self.batch_size
         if self.mic_audio.shape != (batch, audio_samples):
             raise ValueError(f"mic_audio must have shape [B, {audio_samples}]")
-        if self.video.shape != (batch, 3, 224, 224):
-            raise ValueError("video must have shape [B, 3, 224, 224]")
-        if self.speech_mode.shape != (batch,) or self.speech_mode_mask.shape != (batch,):
-            raise ValueError("speech mode tensors must have shape [B]")
-        if torch.any((self.speech_mode < 0) | (self.speech_mode > 1)):
-            raise ValueError("speech mode must be SILENCE or SPEECH")
+        if self.video.ndim not in (4, 5) or self.video.shape[0] != batch:
+            raise ValueError("video must have shape [B,3,H,W] or [B,S,3,H,W]")
+        if self.video.shape[-3] != 3:
+            raise ValueError("video requires three RGB channels")
         if self.speech_codes.shape != (batch, speech_frames, speech_codebooks):
             raise ValueError("speech_codes has an incompatible shape")
         if self.speech_codec_mask.shape != (batch, speech_frames):
             raise ValueError("speech_codec_mask has an incompatible shape")
         valid_codes = self.speech_codes[self.speech_codec_mask]
         if valid_codes.numel() and (
-            valid_codes.min() < 0 or valid_codes.max() >= speech_codebook_size
+            valid_codes.min() < 0 or valid_codes.max() >= speech_codebook_size - 1
         ):
             raise ValueError("speech code is outside the configured codebook")
         if torch.any(self.delta_ms <= 0):
@@ -137,11 +125,33 @@ class SlowMemoryState:
 
 @dataclass(slots=True)
 class SpeechLocalState:
-    temporal: Tensor
+    layer_kv: tuple[LayerKV, ...]
     previous_codes: Tensor
 
     def detach(self) -> SpeechLocalState:
-        return SpeechLocalState(self.temporal.detach(), self.previous_codes.detach())
+        return SpeechLocalState(tuple(item.detach() for item in self.layer_kv),
+                                self.previous_codes.detach())
+
+
+@dataclass(slots=True)
+class AudioEncoderState:
+    pcm: Tensor
+    conv1: Tensor
+    conv2: Tensor
+    layer_kv: tuple[LayerKV, ...]
+    max_logmel: Tensor
+    position: Tensor
+
+    def detach(self) -> AudioEncoderState:
+        return AudioEncoderState(self.pcm.detach(), self.conv1.detach(), self.conv2.detach(),
+                                 tuple(item.detach() for item in self.layer_kv),
+                                 self.max_logmel.detach(), self.position.detach())
+
+    def clone(self) -> AudioEncoderState:
+        return AudioEncoderState(self.pcm.clone(), self.conv1.clone(), self.conv2.clone(),
+                                 tuple(LayerKV(item.key.clone(), item.value.clone())
+                                       for item in self.layer_kv),
+                                 self.max_logmel.clone(), self.position.clone())
 
 
 @dataclass(slots=True)
@@ -149,7 +159,7 @@ class RecurrentState:
     layer_kv: tuple[LayerKV, ...]
     semantic_memory: Tensor
     slow_memory: tuple[SlowMemoryState, ...]
-    audio_cache: Tensor
+    audio_cache: AudioEncoderState
     hidden: Tensor
     speech_local: SpeechLocalState
     unit_index: Tensor
@@ -169,29 +179,24 @@ class RecurrentState:
 @dataclass(slots=True)
 class StepOutput:
     state: RecurrentState
-    speech_mode_logits: Tensor
     speech_codec_logits: Tensor
     hidden: Tensor
     perceiver_slots: Tensor
     jepa_prediction: Tensor
     value: Tensor
-    selected_speech_mode: Tensor
 
-    def sampled_logprob(self, speech_mode: Tensor, speech_codes: Tensor) -> Tensor:
-        mode = torch.log_softmax(self.speech_mode_logits, dim=-1).gather(
-            -1, speech_mode.unsqueeze(-1)
-        ).squeeze(-1)
-        codec = torch.log_softmax(self.speech_codec_logits, dim=-1).gather(
-            -1, speech_codes.unsqueeze(-1)
-        ).squeeze(-1).sum(dim=(-1, -2))
-        return mode + torch.where(speech_mode == int(SpeechMode.SPEECH), codec, 0.0)
+    def sampled_logprob(self, speech_codes: Tensor) -> Tensor:
+        from model.acoustic_policy import acoustic_action_logprob
+
+        return acoustic_action_logprob(self.speech_codec_logits.squeeze(-2),
+                                       speech_codes.squeeze(-1),
+                                       forbidden_tokens=(self.speech_codec_logits.shape[-1] - 1,))
 
 
 @dataclass(slots=True)
 class TrainingStepOutput:
     """Per-unit differentiable outputs without a retained recurrent state."""
 
-    speech_mode_logits: Tensor
     speech_codec_logits: Tensor
     perceiver_slots: Tensor
     jepa_prediction: Tensor
@@ -200,7 +205,6 @@ class TrainingStepOutput:
 
 def training_output(output: StepOutput) -> TrainingStepOutput:
     return TrainingStepOutput(
-        speech_mode_logits=output.speech_mode_logits,
         speech_codec_logits=output.speech_codec_logits,
         perceiver_slots=output.perceiver_slots,
         jepa_prediction=output.jepa_prediction,
@@ -218,7 +222,6 @@ class SpeechSamplingConfig:
 @dataclass(slots=True)
 class GenerationOutput:
     output: StepOutput
-    speech_mode: Tensor
     speech_codes: Tensor
 
 
@@ -227,6 +230,7 @@ class GenerationOutput:
 for _checkpoint_dataclass in (
     LayerKV,
     SlowMemoryState,
+    AudioEncoderState,
     SpeechLocalState,
     RecurrentState,
     StepOutput,

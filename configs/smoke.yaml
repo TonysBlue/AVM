@@ -5,8 +5,8 @@ model:
   num_heads: 4
   ffn_dim: 192
   audio_tokens: 2
-  audio_kernel: 32
-  audio_stride: 16
+  audio_kernel: 400
+  audio_stride: 160
   vision_tokens: 16
   perceiver_slots: 16
   perceiver_layers: 2
@@ -15,27 +15,47 @@ model:
   slow_memory_type: gated_delta
   rematerialization_segment_units: 4
   kv_units: 4
-  kv_window_ms: 320
-  speech_frames_per_unit: 1
-  speech_codebooks: 2
+  kv_window_ms: 800
+  speech_frames_per_unit: 5
+  speech_codebooks: 1
   speech_codebook_size: 32
-  speech_depth_layers: 1
+  speech_depth_layers: 2
   speech_depth_heads: 4
-  speech_depth_ffn_dim: 128
+  speech_depth_ffn_dim: 96
   dropout: 0.0
   activation_checkpointing: false
+  kv_heads: 2
+  audio_dim: 32
+  audio_layers: 2
+  audio_heads: 4
+  audio_ffn_dim: 96
+  audio_cache_frames: 40
+  vision_dim: 32
+  vision_layers: 2
+  vision_heads: 4
+  vision_ffn_dim: 96
+  vision_patch_size: 56
+  vision_position_grid: 4
+  perceiver_dim: 32
+  perceiver_heads: 4
+  perceiver_ffn_dim: 96
+  jepa_dim: 32
+  jepa_heads: 4
+  jepa_ffn_dim: 96
+  speech_dim: 32
+  speech_window_units: 2
 data:
   dataset: synthetic
   source: synthetic
-  audio_sample_rate: 4000
-  codec_frame_rate: 12.5
+  audio_sample_rate: 16000
+  codec_frame_rate: 25.0
   codec_id: synthetic-codec-v1
   codec_weight_hash: synthetic
   codec_revision: synthetic
-  codec_codebooks: 2
+  codec_codebooks: 1
   codec_codebook_size: 32
-  unit_ms: 80
-  unit_audio_samples: 320
+  unit_ms: 200
+  unit_audio_samples: 3200
   video_height: 224
   video_width: 224
   episode_units: 8
@@ -47,7 +67,7 @@ training:
   weight_decay: 0.01
   gradient_accumulation_steps: 1
   tbptt_units: 8
-  mixed_precision: "no"
+  mixed_precision: 'no'
   max_grad_norm: 1.0
   checkpoint_every: 2
   log_every: 1
@@ -71,5 +91,6 @@ tracking:
   media_warning_gb: 40
   media_stop_gb: 50
 runtime:
+  clock_kind: logical_fixture
   data_root: ~/latentloop-data/datasets
   experiment_root: ~/latentloop-data/experiments/smoke/default

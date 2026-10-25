@@ -70,7 +70,8 @@ def test_perceiver_only_lookahead_does_not_advance_recurrent_state(smoke_config)
     )
 
     assert target.shape == (1, 16, smoke_config.model.model_dim)
-    assert returned_cache.shape == state.audio_cache.shape
+    assert returned_cache.pcm.shape == state.audio_cache.pcm.shape
+    assert torch.equal(returned_cache.position, state.audio_cache.position + 10)
     assert torch.equal(state.semantic_memory, before.semantic_memory)
     assert torch.equal(state.hidden, before.hidden)
     assert torch.equal(state.unit_index, before.unit_index)
@@ -132,7 +133,7 @@ def test_long_stream_keeps_recent_and_slow_memory_bounded(smoke_config) -> None:
     expected_kv = smoke_config.model.kv_units * smoke_config.model.perceiver_slots
     expected_slow = (
         1,
-        smoke_config.model.num_heads,
+        smoke_config.model.kv_heads,
         smoke_config.model.model_dim // smoke_config.model.num_heads,
     )
 

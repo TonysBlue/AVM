@@ -26,7 +26,7 @@ from contracts.receipt import EnvironmentReceipt
 
 def observation_to_payload(value: ObservationSignal) -> bytes:
     message = ObservationMessage(
-        protocol_version="avm-realtime-v1",
+        protocol_version="avm-realtime-v2",
         session_id=value.session_id,
         unit_index=value.unit_index,
         timestamp_ms=value.timestamp_ms,
@@ -53,7 +53,7 @@ def observation_to_message(value: ObservationSignal) -> bytes:
 
 def message_to_observation(payload: bytes) -> ObservationSignal:
     message = ObservationMessage.FromString(payload)
-    if message.protocol_version != "avm-realtime-v1":
+    if message.protocol_version != "avm-realtime-v2":
         raise ValueError("incompatible AVM observation protocol")
     if not message.HasField("mic") or not message.HasField("video"):
         raise ValueError("ObservationSignal requires mic and video messages")
@@ -83,13 +83,18 @@ def message_to_observation(payload: bytes) -> ObservationSignal:
 def actuation_to_payload(value: ActuationSignal) -> bytes:
     message = ActuationMessage(
         session_id=value.session_id, unit_index=value.unit_index,
-        protocol_version="avm-realtime-v1",
+        protocol_version="avm-realtime-v2",
     )
-    message.speech.sample_rate_hz = value.speech.sample_rate_hz
-    message.speech.channels = value.speech.channels
-    message.speech.encoding = value.speech.encoding
-    message.speech.silent = value.speech.silent
-    message.speech.pcm = value.speech.pcm
+    if value.speech is not None:
+        message.speech.sample_rate_hz = value.speech.sample_rate_hz
+        message.speech.channels = value.speech.channels
+        message.speech.encoding = value.speech.encoding
+        message.speech.pcm = value.speech.pcm
+    if value.speech_unit_index is not None:
+        message.speech_unit_index = value.speech_unit_index
+    if value.play_at_ms is not None:
+        message.play_at_ms = value.play_at_ms
+    message.generation_epoch = value.generation_epoch
     return message.SerializeToString()
 
 
@@ -99,10 +104,8 @@ def actuation_to_message(value: ActuationSignal) -> bytes:
 
 def message_to_actuation(payload: bytes) -> ActuationSignal:
     message = ActuationMessage.FromString(payload)
-    if message.protocol_version != "avm-realtime-v1":
+    if message.protocol_version != "avm-realtime-v2":
         raise ValueError("incompatible AVM actuation protocol")
-    if not message.HasField("speech"):
-        raise ValueError("ActuationSignal requires a speech message")
     return ActuationSignal(
         session_id=message.session_id,
         unit_index=message.unit_index,
@@ -111,8 +114,11 @@ def message_to_actuation(payload: bytes) -> ActuationSignal:
             sample_rate_hz=message.speech.sample_rate_hz,
             channels=message.speech.channels,
             encoding=message.speech.encoding,
-            silent=message.speech.silent,
-        ),
+        ) if message.HasField("speech") else None,
+        speech_unit_index=(message.speech_unit_index if message.HasField("speech_unit_index")
+                           else None),
+        play_at_ms=message.play_at_ms if message.HasField("play_at_ms") else None,
+        generation_epoch=message.generation_epoch,
     )
 
 

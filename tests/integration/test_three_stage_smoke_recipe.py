@@ -31,7 +31,7 @@ def test_public_smoke_recipe_runs_all_three_stages(tmp_path: Path) -> None:
     overrides = [
         f"runtime.data_root={tmp_path / 'datasets'}",
         f"training.rl.environment_socket={harness_socket}",
-        f"training.rl.codec_socket={codec_socket}",
+        f"runtime.native_acoustic_socket={codec_socket}",
         f"training.rl.reward_socket={reward_socket}",
         f"training.rl.timeline_root={timeline_root}",
         f"training.rl.session_manifest={session_manifest}",
@@ -44,9 +44,9 @@ def test_public_smoke_recipe_runs_all_three_stages(tmp_path: Path) -> None:
         "synthetic-codec-v1",
         "synthetic",
         "synthetic",
-        sample_rate=24000,
-        frame_samples=1920,
-        codebooks=2,
+        sample_rate=16000,
+        frame_samples=3200,
+        codebooks=1,
         codebook_size=32,
     )
     codec = CodecWorker(codec_socket, identity)

@@ -72,27 +72,24 @@ def test_recurrent_ppo_updates_speech_policy_and_value() -> None:
 
 
 
-def test_speech_policy_logprob_is_the_joint_mode_and_codec_probability(
+def test_speech_policy_logprob_is_the_joint_five_code_probability(
     smoke_config,
 ) -> None:
     model = StreamingLatentLoop(smoke_config.model)
     unit = SyntheticEpisodeDataset(smoke_config.data, smoke_config.model).make_episode(0).units[0]
-    mode = torch.ones(1, dtype=torch.long)
     codes = unit.speech_codes
     sampling = SpeechSamplingConfig(temperature=0.8, top_k=0)
     output = model.forward_step(
         unit.observation,
         model.initial_state(1, "cpu"),
         speech_teacher_codes=codes,
-        speech_teacher_mode=mode,
     )
 
-    speech = _policy_logprobs(output, mode, codes, sampling)
-    mode_logprob = torch.log_softmax(
-        output.speech_mode_logits / sampling.temperature, dim=-1
-    ).gather(-1, mode[:, None]).squeeze(-1)
+    speech = _policy_logprobs(output, codes, sampling)
+    logits = output.speech_codec_logits.clone() / sampling.temperature
+    logits[..., -1] = -torch.inf
     codec_logprob = torch.log_softmax(
-        output.speech_codec_logits / sampling.temperature, dim=-1
+        logits, dim=-1
     ).gather(-1, codes[..., None]).squeeze(-1).sum(dim=(1, 2))
 
-    assert torch.allclose(speech, mode_logprob + codec_logprob)
+    assert torch.allclose(speech, codec_logprob)

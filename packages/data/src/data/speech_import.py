@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import soundfile as sf
 import torch
-from model.types import Episode, SpeechMode, StreamUnit
+from model.types import Episode, StreamUnit
 from runtime.config import DataConfig, ModelConfig
 
 
@@ -24,11 +24,6 @@ def _read_audio(path: str | Path, sample_rate: int) -> torch.Tensor:
     if waveform.abs().max() > 1.0:
         raise ValueError(f"{path} contains audio outside [-1, 1]")
     return waveform
-
-
-def _speech_activity(target: torch.Tensor, frame_samples: int) -> list[bool]:
-    frames = target.reshape(-1, frame_samples)
-    return [bool(active) for active in (frames.square().mean(dim=1) > 1e-5).tolist()]
 
 
 def _segment_activity(segments: list[dict[str, Any]], ticks: int, frame_samples: int) -> list[bool]:
@@ -47,7 +42,7 @@ def _segment_activity(segments: list[dict[str, Any]], ticks: int, frame_samples:
         if not isinstance(segment.get("turn_id"), str) or not segment["turn_id"].strip():
             raise ValueError(f"target_segments[{index}].turn_id must be a non-empty string")
         if start < 0 or start % frame_samples:
-            raise ValueError("assistant segment starts must be on an 80 ms boundary")
+            raise ValueError("assistant segment starts must be on a 200 ms boundary")
         if end <= start:
             raise ValueError("assistant segment end must be greater than its start")
         start_frame = start // frame_samples
@@ -70,16 +65,23 @@ def _load_videos(
     loaded = np.load(Path(path).expanduser(), allow_pickle=False)
     try:
         ticks = loaded["ticks"]
-        frames = loaded["frames"]
+        frames = (loaded["frames"] if "frames" in loaded.files
+                  else [loaded[f"frame_{index}"] for index in range(len(ticks))])
     finally:
         loaded.close()
     if len(ticks) != len(frames):
         raise ValueError("video ticks and frames must have identical lengths")
-    expected = (3, data.video_height, data.video_width)
     result: dict[int, torch.Tensor] = {}
     for tick, frame in zip(ticks.tolist(), frames, strict=True):
-        if tuple(frame.shape) != expected:
-            raise ValueError(f"video frame must have shape {expected}")
+        if frame.ndim not in (3, 4) or frame.shape[-3] != 3:
+            raise ValueError("video frame must contain RGB patches with an optional slice axis")
+        if (frame.shape[-2] % model.vision_patch_size
+                or frame.shape[-1] % model.vision_patch_size):
+            raise ValueError("video dimensions must be divisible by the model patch size")
+        if min(frame.shape[-2:]) < model.vision_patch_size:
+            raise ValueError("video frame must contain at least one spatial patch")
+        if not np.isfinite(frame).all() or np.any((frame < 0) | (frame > 1)):
+            raise ValueError("video pixels must be finite and normalized to [0,1]")
         if int(tick) in result:
             raise ValueError("video tick is duplicated")
         result[int(tick)] = torch.from_numpy(frame.copy()).float()
@@ -149,11 +151,8 @@ def _build_episode(
     timeline_samples = ticks * data.unit_audio_samples
     mic = torch.nn.functional.pad(mic, (0, timeline_samples - mic.numel()))
     target = torch.nn.functional.pad(target, (0, timeline_samples - target.numel()))
-    active = (
+    if explicit_segments is not None:
         _segment_activity(explicit_segments, ticks, data.unit_audio_samples)
-        if explicit_segments is not None
-        else _speech_activity(target, data.unit_audio_samples)
-    )
     video_path = record.get("videos")
     videos = _load_videos(str(_resolve(base, video_path)) if video_path else None, model, data)
     if any(tick < 0 or tick >= ticks for tick in videos):
@@ -165,7 +164,6 @@ def _build_episode(
         raise ValueError("AVM episode requires an initial video frame")
     current_video = videos[0]
     for tick in range(ticks):
-        speaking = active[tick]
         current_video = videos.get(tick, current_video)
         units.append(
             StreamUnit(
@@ -175,16 +173,10 @@ def _build_episode(
                     None, tick * data.unit_audio_samples : (tick + 1) * data.unit_audio_samples
                 ],
                 video=current_video[None],
-                speech_mode=torch.tensor(
-                    [int(SpeechMode.SPEECH if speaking else SpeechMode.SILENCE)]
-                ),
-                speech_mode_mask=torch.tensor([True]),
                 speech_codes=torch.zeros(
                     1, model.speech_frames_per_unit, model.speech_codebooks, dtype=torch.long
                 ),
-                speech_codec_mask=torch.full(
-                    (1, model.speech_frames_per_unit), speaking, dtype=torch.bool
-                ),
+                speech_codec_mask=torch.ones((1, 5), dtype=torch.bool),
             )
         )
     metadata = {
@@ -200,14 +192,14 @@ def _build_episode(
         "device_id_hash": record.get("device_id_hash", "speech-import"),
         "turns": record.get("turns", []),
         "stage": record.get("stage", "pretrain"),
-        "schema_id": "avm-episode-v1",
+        "schema_id": "avm-episode-v2",
         "dataset_scale": data.dataset,
         "sample_kind": record.get("sample_kind", "supervised_episode"),
         "supervision_kind": record.get("supervision_kind", "speech"),
         "task_id": record.get("task_id", record["episode_id"]),
         "environment_id": record.get("environment_id", "recorded"),
         "environment_version": record.get("environment_version", "1"),
-        "protocol_version": record.get("protocol_version", "avm-realtime-v1"),
+        "protocol_version": record.get("protocol_version", "avm-realtime-v2"),
     }
     episode = Episode(str(record["episode_id"]), units, metadata, target_speech=target)
     episode.validate(

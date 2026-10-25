@@ -26,6 +26,7 @@ from model import (
     compute_losses,
     training_output,
 )
+from model.acoustic_policy import acoustic_distribution_logits
 from model.types import (
     Episode,
     RecurrentState,
@@ -40,11 +41,13 @@ from training.checkpoint import (
     CheckpointManager,
     CheckpointMetadata,
     DataCursor,
+    capture_rng_state,
     config_hash,
     file_sha256,
     inspect_checkpoint,
     load_reference_recurrent_state,
 )
+from training.optimizer_state import OptimizerStateSnapshot
 from training.physical_rollout import PhysicalRolloutClient, observation_to_stream_unit
 from training.ppo import (
     generalized_advantage_estimate,
@@ -58,15 +61,10 @@ from training.tracking import Tracker
 def _loss_denominators(units: Sequence[StreamUnit]) -> dict[str, float]:
     return {
         "total": float(len(units)),
-        "speech": float(max(sum(int(u.speech_mode_mask.sum()) for u in units), 1)),
-        "speech_mode": float(max(sum(int(u.speech_mode_mask.sum()) for u in units), 1)),
+        "speech": float(max(sum(int(u.speech_codec_mask.sum()) for u in units), 1)),
         "speech_codec": float(
             max(
-                sum(
-                    int((u.speech_codec_mask & u.speech_mode.eq(1)[:, None]).sum())
-                    * u.speech_codes.shape[-1]
-                    for u in units
-                ),
+                sum(int(u.speech_codec_mask.sum()) * u.speech_codes.shape[-1] for u in units),
                 1,
             )
         ),
@@ -119,14 +117,11 @@ def _rematerialized_segment(
     def run(*initial_tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
         current = _pytree.tree_unflatten(list(initial_tensors), state_spec)
         outputs: list[Any] = []
-        for unit, codes in zip(
-            units, teacher_codes, strict=True
-        ):
+        for unit, codes in zip(units, teacher_codes, strict=True):
             output = model(
                 unit.observation,
                 current,
                 codes,
-                speech_teacher_mode=unit.speech_mode,
             )
             outputs.append(training_output(output))
             current = output.state
@@ -135,9 +130,7 @@ def _rematerialized_segment(
             result_spec.append(spec)
         return tuple(flat)
 
-    flat_result = checkpoint(
-        run, *state_flat, use_reentrant=False, preserve_rng_state=True
-    )
+    flat_result = checkpoint(run, *state_flat, use_reentrant=False, preserve_rng_state=True)
     return _pytree.tree_unflatten(list(flat_result), result_spec[0])
 
 
@@ -148,7 +141,6 @@ def _aggregate_update_metrics(
     names = (
         "total",
         "speech",
-        "speech_mode",
         "speech_codec",
         "jepa",
         "jepa_prediction",
@@ -160,7 +152,6 @@ def _aggregate_update_metrics(
         denominator = sum(item["denoms"][name] for item in records)
         metrics[f"train/loss_{name}"] = numerator / denominator if denominator else float("nan")
     speech_valid = sum(item["speech_valid"] for item in records)
-    mode_correct = sum(item["mode_correct"] for item in records)
     for codebook, correct in enumerate(
         sum(
             (item["speech_correct"] for item in records),
@@ -173,11 +164,8 @@ def _aggregate_update_metrics(
     target_units = sum(item["target_units"] for item in records)
     metrics.update(
         {
-            "speech/mode_accuracy": float(
-                mode_correct / max(sum(item["mode_valid"] for item in records), 1)
-            ),
             "speech/valid_frames": float(speech_valid),
-            "speech/active_unit_fraction": float(speech_valid / max(target_units, 1)),
+            "speech/supervision_density": float(speech_valid / max(target_units * 5, 1)),
             "speech/codec_accuracy_mean": (
                 float(
                     sum(
@@ -262,12 +250,21 @@ def _checkpoint_metadata(
         codec_weight_hash=config.data.codec_weight_hash,
         git_commit=_git_commit(),
         codec_revision=config.data.codec_revision,
+        native_source_lock_sha256=(
+            file_sha256(config.model.native_source_lock)
+            if config.model.native_source_lock
+            else None
+        ),
+        native_qualification_sha256=(
+            file_sha256(config.model.native_qualification)
+            if config.model.native_qualification
+            and Path(config.model.native_qualification).expanduser().is_file()
+            else None
+        ),
         parent_sha256=parent_sha256,
         reference_checkpoint_sha256=reference_checkpoint_sha256,
         stage=config.training.stage,
-        algorithm=(
-            config.training.rl.algorithm if config.training.stage == "rl" else None
-        ),
+        algorithm=(config.training.rl.algorithm if config.training.stage == "rl" else None),
         environment_id=config.training.rl.environment_id or None,
         session_manifest_sha256=(
             file_sha256(Path(config.training.rl.session_manifest).expanduser())
@@ -296,9 +293,7 @@ def _checkpoint_metadata(
             else None
         ),
         sft_preservation_manifest_sha256=(
-            file_sha256(
-                Path(config.training.rl.sft_preservation_manifest).expanduser()
-            )
+            file_sha256(Path(config.training.rl.sft_preservation_manifest).expanduser())
             if config.training.stage == "rl"
             and config.training.rl.sft_preservation_manifest
             and Path(config.training.rl.sft_preservation_manifest).expanduser().is_file()
@@ -316,6 +311,26 @@ def _data_identity(config: ProjectConfig) -> str:
     return config_hash(config.as_dict()["data"])
 
 
+def _validate_requested_devices(config: ProjectConfig) -> None:
+    if config.training.stage == "rl":
+        selected = [
+            value
+            for value in (config.training.rl.policy_device, config.training.rl.reference_device)
+            if value
+        ]
+        selected += config.training.rl.candidate_devices
+    else:
+        selected = config.training.devices
+    indices = [
+        torch.device(value).index for value in selected if torch.device(value).type == "cuda"
+    ]
+    count = torch.cuda.device_count()
+    if indices and max(indices) >= count:
+        raise RuntimeError(
+            f"configured placement requires {max(indices) + 1} visible CUDA devices; found {count}"
+        )
+
+
 def train(
     config: ProjectConfig,
     *,
@@ -329,9 +344,9 @@ def train(
     requires_cuda = config.data.dataset == "canary" or config.runtime.require_cuda
     if requires_cuda and not torch.cuda.is_available():
         raise RuntimeError(
-            "this training profile requires a CUDA GPU; "
-            "torch.cuda.is_available() is false"
+            "this training profile requires a CUDA GPU; torch.cuda.is_available() is false"
         )
+    _validate_requested_devices(config)
     if config.training.stage == "rl":
         return train_online_ppo(
             config,
@@ -360,9 +375,11 @@ def train(
         mixed_precision=config.training.mixed_precision,
         gradient_accumulation_steps=config.training.gradient_accumulation_steps,
     )
-    model = model or StreamingLatentLoop(config.model)
-    if init_from:
-        initialize_exact_weights(model, init_from)
+    model = model or StreamingLatentLoop(config.model, load_native=not bool(init_from or resume))
+    if init_from or resume:
+        initialize_exact_weights(model, init_from or resume)
+    if config.model.native_source_lock:
+        model.float()
     configure_trainable_parameters(model, config)
     head_parameters = []
     backbone_parameters = []
@@ -399,10 +416,19 @@ def train(
         )
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, learning_rate_scale)
-    model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
+    if config.training.devices:
+        if accelerator.num_processes != 1:
+            raise ValueError("module model parallelism requires a single training process")
+        model.place(config.training.devices)
+        model, optimizer, scheduler = accelerator.prepare(
+            model, optimizer, scheduler, device_placement=[False, False, False]
+        )
+    else:
+        model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
     root = config.runtime.root_path()
     checkpoint_manager = CheckpointManager(root / "checkpoints")
     unwrapped_model = accelerator.unwrap_model(model)
+    input_device = unwrapped_model.input_device
     tracker = Tracker(
         config,
         model_name=f"{unwrapped_model.parameter_count()}p",
@@ -470,10 +496,10 @@ def train(
                     if train_state["update"] >= target_updates:
                         break
                     chunk = episode.units[chunk_start : chunk_start + chunk_size]
-                    moved = [unit.to(accelerator.device) for unit in chunk]
+                    moved = [unit.to(input_device) for unit in chunk]
                     if recurrent is None:
                         recurrent = accelerator.unwrap_model(model).initial_state(
-                            moved[0].batch_size, accelerator.device
+                            moved[0].batch_size, input_device
                         )
                     with accelerator.accumulate(model):
                         chunk_losses: dict[str, torch.Tensor] = {}
@@ -483,7 +509,6 @@ def train(
                             for name in (
                                 "total",
                                 "speech",
-                                "speech_mode",
                                 "speech_codec",
                                 "jepa",
                                 "jepa_prediction",
@@ -492,10 +517,10 @@ def train(
                         }
                         speech_correct = torch.zeros(
                             config.model.speech_codebooks,
-                            device=accelerator.device,
+                            device=input_device,
                             dtype=torch.long,
                         )
-                        speech_valid = torch.zeros((), device=accelerator.device, dtype=torch.long)
+                        speech_valid = torch.zeros((), device=input_device, dtype=torch.long)
                         output = None
                         outputs: list[Any] = []
                         segment_units = config.model.rematerialization_segment_units
@@ -504,8 +529,9 @@ def train(
                         )
                         teacher_codes = [
                             unit.speech_codes
-                            if sampling_probability <= 0
-                            or random.random() >= sampling_probability
+                            if unit.speech_codec_mask.all() and (
+                                sampling_probability <= 0
+                                or random.random() >= sampling_probability)
                             else None
                             for unit in moved
                         ]
@@ -532,17 +558,15 @@ def train(
                                     chunk_numerators.get(name), value, unit_denoms[name]
                                 )
                                 chunk_denoms[name] += unit_denoms[name]
-                            predictions = output.speech_codec_logits.detach().argmax(dim=-1)
-                            valid = (unit.speech_codec_mask & unit.speech_mode.eq(1)[:, None])[
-                                :, :, None
-                            ]
+                            predictions = output.speech_codec_logits.detach()[..., :-1].argmax(-1)
+                            valid = unit.speech_codec_mask[:, :, None]
                             speech_correct += (predictions.eq(unit.speech_codes) & valid).sum(
                                 dim=(0, 1)
                             )
                             speech_valid += valid[:, :, 0].sum()
                         next_index = chunk_start + len(chunk)
                         lookahead = (
-                            episode.units[next_index].to(accelerator.device)
+                            episode.units[next_index].to(input_device)
                             if next_index < len(episode.units)
                             else None
                         )
@@ -557,8 +581,7 @@ def train(
                         losses["jepa_prediction"] = jepa["prediction"]
                         losses["jepa_variance"] = jepa["variance"]
                         losses["total"] = (
-                            losses["total"]
-                            + config.training.jepa_loss_weight * losses["jepa"]
+                            losses["total"] + config.training.jepa_loss_weight * losses["jepa"]
                         )
                         for name, value in (
                             ("jepa", jepa["total"]),
@@ -567,11 +590,10 @@ def train(
                         ):
                             chunk_numerators[name] = value.detach().float() * jepa_pairs
                             chunk_denoms[name] = float(jepa_pairs)
-                        chunk_numerators["total"] = (
-                            chunk_numerators["total"]
-                            + config.training.jepa_loss_weight
-                            * jepa["total"].detach().float()
-                            * len(moved)
+                        chunk_numerators["total"] = chunk_numerators[
+                            "total"
+                        ] + config.training.jepa_loss_weight * jepa["total"].detach().float() * len(
+                            moved
                         )
                         accelerator.backward(losses["total"])
                         if accelerator.sync_gradients:
@@ -621,12 +643,6 @@ def train(
                                 "speech_correct": speech_correct.detach().cpu(),
                                 "speech_valid": int(speech_valid.item()),
                                 "target_units": len(moved),
-                                "mode_correct": int(
-                                    (output.speech_mode_logits.argmax(-1) == unit.speech_mode)
-                                    .sum()
-                                    .item()
-                                ),
-                                "mode_valid": int(unit.speech_mode_mask.sum().item()),
                             }
                         )
                         continue
@@ -642,12 +658,6 @@ def train(
                             "speech_correct": speech_correct.detach().cpu(),
                             "speech_valid": int(speech_valid.item()),
                             "target_units": len(moved),
-                            "mode_correct": int(
-                                (output.speech_mode_logits.argmax(-1) == moved[-1].speech_mode)
-                                .sum()
-                                .item()
-                            ),
-                            "mode_valid": int(moved[-1].speech_mode_mask.sum().item()),
                         }
                     )
                     last_metrics = _aggregate_update_metrics(pending_update_metrics, config)
@@ -759,12 +769,17 @@ def train(
 
 
 def initialize_exact_weights(model: StreamingLatentLoop, path: str | Path) -> None:
-    payload = torch.load(Path(path), map_location="cpu", weights_only=False)
+    payload = torch.load(Path(path), map_location="cpu", weights_only=False, mmap=True)
     metadata = payload.get("metadata")
     if not isinstance(metadata, dict):
         raise ValueError("initial checkpoint metadata is incomplete")
-    if metadata.get("model_schema_id") != "avm-model-v2":
+    if metadata.get("model_schema_id") != "avm-model-v3":
         raise ValueError("initial checkpoint AVM model schema is incompatible")
+    from runtime.native_assets import validate_native_checkpoint_identity
+
+    validate_native_checkpoint_identity(
+        metadata, model.config.native_source_lock, model.config.native_qualification
+    )
     source = payload.get("model")
     if not isinstance(source, dict):
         raise ValueError("initial checkpoint does not contain a model state")
@@ -773,7 +788,9 @@ def initialize_exact_weights(model: StreamingLatentLoop, path: str | Path) -> No
         source[name].shape != current[name].shape for name in current
     ):
         raise ValueError("SFT checkpoint does not contain the complete current model")
-    model.load_state_dict(source, strict=True)
+    model.load_state_dict(
+        source, strict=True, assign=any(parameter.is_meta for parameter in model.parameters())
+    )
 
 
 def scheduled_sampling_probability(update: int, config: ProjectConfig) -> float:
@@ -809,40 +826,26 @@ def configure_trainable_parameters(model: StreamingLatentLoop, config: ProjectCo
 
 def _sample_logprob(
     output: Any,
-    mode: torch.Tensor,
     codes: torch.Tensor,
     sampling: SpeechSamplingConfig,
 ) -> torch.Tensor:
-    temperature = sampling.temperature
-    mode_lp = (
-        torch.log_softmax(output.speech_mode_logits / temperature, dim=-1)
-        .gather(-1, mode[:, None])
-        .squeeze(-1)
+    scores = acoustic_distribution_logits(
+        output.speech_codec_logits,
+        temperature=sampling.temperature,
+        top_k=sampling.top_k,
+        forbidden_tokens=(output.speech_codec_logits.shape[-1] - 1,),
     )
-    codec_lp = (
-        torch.log_softmax(output.speech_codec_logits / temperature, dim=-1)
-        .gather(-1, codes[..., None])
-        .squeeze(-1)
-    )
-    codec_lp = torch.where(
-        mode.eq(1)[:, None, None], codec_lp, torch.zeros_like(codec_lp)
-    )
-    return torch.cat(
-        (
-            mode_lp.reshape(mode.shape[0], -1),
-            codec_lp.reshape(mode.shape[0], -1),
-        ),
-        dim=-1,
+    return (torch.log_softmax(scores, dim=-1).gather(-1, codes[..., None]).squeeze(-1)).reshape(
+        codes.shape[0], -1
     )
 
 
 def _policy_logprobs(
     output: Any,
-    mode: torch.Tensor,
     codes: torch.Tensor,
     sampling: SpeechSamplingConfig,
 ) -> torch.Tensor:
-    values = _sample_logprob(output, mode, codes, sampling)
+    values = _sample_logprob(output, codes, sampling)
     return values.sum(dim=-1)
 
 
@@ -870,7 +873,6 @@ def _session_specs(path: str) -> list[tuple[str, str, int]]:
 @dataclass(slots=True)
 class _PPOUnit:
     observation: ObservationSignal
-    mode: torch.Tensor
     codes: torch.Tensor
     old_speech_logprob: torch.Tensor
     old_value: torch.Tensor
@@ -881,17 +883,29 @@ class _PPOUnit:
 class _CandidateResult:
     accepted: bool
     reason: str | None
-    model_state: dict[str, torch.Tensor]
+    ready_policy: StreamingLatentLoop | None
     optimizer_state: dict[str, Any]
     metrics: dict[str, float]
 
 
 def _trace_sample(
-    mode: torch.Tensor, codes: torch.Tensor
+    codes: torch.Tensor,
+    observation: ObservationSignal,
+    actuation: Any,
+    playback_delay_ms: int,
 ) -> dict[str, Any]:
     return {
-        "speech_mode": int(mode.detach().cpu().reshape(-1)[0]),
         "speech_codes": codes.detach().cpu().tolist()[0],
+        "condition_unit_index": observation.unit_index,
+        "generation_epoch": actuation.generation_epoch,
+        "planned_play_at_ms": observation.timestamp_ms + playback_delay_ms,
+        "delivered_speech_unit_index": actuation.speech_unit_index,
+        "delivered_play_at_ms": actuation.play_at_ms,
+        "delivered_pcm_sha256": (
+            hashlib.sha256(actuation.speech.pcm).hexdigest()
+            if actuation.speech is not None
+            else None
+        ),
     }
 
 
@@ -914,7 +928,7 @@ def _supervised_episode_objectives(
             model,
             segment,
             state,
-            [unit.speech_codes for unit in segment],
+            [unit.speech_codes if unit.speech_codec_mask.all() else None for unit in segment],
         )
         outputs.extend(segment_outputs)
     losses = [
@@ -947,9 +961,9 @@ def _supervised_episode_loss(
     device: torch.device,
 ) -> torch.Tensor:
     """Behavior-only objective used by the preservation acceptance gate."""
-    return _supervised_episode_objectives(
-        model, episode, config, device, include_jepa=False
-    )["behavior"]
+    return _supervised_episode_objectives(model, episode, config, device, include_jepa=False)[
+        "behavior"
+    ]
 
 
 def _ppo_guard_episodes(config: ProjectConfig) -> tuple[Episode, Episode]:
@@ -986,13 +1000,52 @@ def _train_ppo_candidate(
     device: torch.device,
     sampling: SpeechSamplingConfig,
 ) -> _CandidateResult:
-    candidate = serving.to(device).eval()
+    selected = config.training.rl.candidate_devices
+    compute_device = torch.device(selected[0]) if selected else device
+    enabled = compute_device.type == "cuda" and config.training.mixed_precision != "no"
+    dtype = torch.bfloat16 if config.training.mixed_precision == "bf16" else torch.float16
+    with torch.autocast(compute_device.type, dtype=dtype, enabled=enabled):
+        return _optimize_ppo_candidate(
+            copy.deepcopy(serving),
+            copy.deepcopy(optimizer_state),
+            units,
+            lookahead_observation,
+            window_start_state,
+            rewards,
+            bootstrap_masks,
+            bootstrap_value,
+            config,
+            device,
+            sampling,
+        )
+
+
+def _optimize_ppo_candidate(
+    serving: StreamingLatentLoop,
+    optimizer_state: dict[str, Any],
+    units: tuple[_PPOUnit, ...],
+    lookahead_observation: ObservationSignal,
+    window_start_state: RecurrentState,
+    rewards: tuple[float, ...],
+    bootstrap_masks: tuple[float, ...],
+    bootstrap_value: torch.Tensor,
+    config: ProjectConfig,
+    device: torch.device,
+    sampling: SpeechSamplingConfig,
+) -> _CandidateResult:
+    if config.training.rl.candidate_devices:
+        serving.place(config.training.rl.candidate_devices, dtype=torch.float32)
+        device = serving.input_device
+    candidate = (
+        serving.to(device).train() if not config.training.rl.candidate_devices else serving.train()
+    )
     candidate_optimizer = torch.optim.AdamW(
         [parameter for parameter in candidate.parameters() if parameter.requires_grad],
         lr=config.training.backbone_learning_rate,
         weight_decay=config.training.weight_decay,
     )
     candidate_optimizer.load_state_dict(optimizer_state)
+    del optimizer_state
     old_value = torch.cat([unit.old_value for unit in units]).to(device)
     reward_tensor = torch.tensor(rewards, device=device)
     discounts = time_discounts(
@@ -1008,19 +1061,15 @@ def _train_ppo_candidate(
             torch.tensor(bootstrap_masks, device=device),
             config.training.rl.gae_lambda,
         )
-        advantages = (advantages - advantages.mean()) / advantages.std(
-            unbiased=False
-        ).clamp_min(config.training.rl.advantage_epsilon)
+        advantages = (advantages - advantages.mean()) / advantages.std(unbiased=False).clamp_min(
+            config.training.rl.advantage_epsilon
+        )
 
     replay_episode, evaluation_episode = _ppo_guard_episodes(config)
     with torch.no_grad():
-        baseline_eval_loss = _supervised_episode_loss(
-            candidate, evaluation_episode, config, device
-        )
+        baseline_eval_loss = _supervised_episode_loss(candidate, evaluation_episode, config, device)
     old_speech = torch.cat([unit.old_speech_logprob for unit in units]).to(device)
-    reference_speech = torch.cat(
-        [unit.reference_speech_logprob for unit in units]
-    ).to(device)
+    reference_speech = torch.cat([unit.reference_speech_logprob for unit in units]).to(device)
     last_loss: torch.Tensor | None = None
     last_components: dict[str, torch.Tensor] = {}
     last_sft_replay_loss: torch.Tensor | None = None
@@ -1032,9 +1081,8 @@ def _train_ppo_candidate(
         current_values: list[torch.Tensor] = []
         outputs: list[Any] = []
         stream_units = [
-            replace(
-                observation_to_stream_unit(item.observation, config), speech_mode=item.mode
-            ).to(device) for item in units
+            replace(observation_to_stream_unit(item.observation, config)).to(device)
+            for item in units
         ]
         segment_units = config.model.rematerialization_segment_units
         for segment_start in range(0, len(units), segment_units):
@@ -1050,7 +1098,6 @@ def _train_ppo_candidate(
         for item, output in zip(units, outputs, strict=True):
             speech_logprob = _policy_logprobs(
                 output,
-                item.mode.to(device),
                 item.codes.to(device),
                 sampling,
             )
@@ -1066,15 +1113,13 @@ def _train_ppo_candidate(
             "reference_speech": reference_speech,
         }
         invalid_inputs = [
-            name
-            for name, value in ppo_inputs.items()
-            if not bool(torch.isfinite(value).all())
+            name for name, value in ppo_inputs.items() if not bool(torch.isfinite(value).all())
         ]
         if invalid_inputs:
             return _CandidateResult(
                 False,
                 "non-finite PPO inputs: " + ", ".join(invalid_inputs),
-                {},
+                None,
                 {},
                 {},
             )
@@ -1123,7 +1168,7 @@ def _train_ppo_candidate(
         ]
         if invalid:
             return _CandidateResult(
-                False, "non-finite candidate loss: " + ", ".join(invalid), {}, {}, {}
+                False, "non-finite candidate loss: " + ", ".join(invalid), None, {}, {}
             )
         candidate_optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -1135,12 +1180,10 @@ def _train_ppo_candidate(
             candidate.parameters(), config.training.max_grad_norm
         )
         if not gradients_finite or not bool(torch.isfinite(gradient_norm)):
-            return _CandidateResult(False, "non-finite candidate gradients", {}, {}, {})
+            return _CandidateResult(False, "non-finite candidate gradients", None, {}, {})
         candidate_optimizer.step()
-        if not all(
-            bool(torch.isfinite(parameter).all()) for parameter in candidate.parameters()
-        ):
-            return _CandidateResult(False, "non-finite candidate weights", {}, {}, {})
+        if not all(bool(torch.isfinite(parameter).all()) for parameter in candidate.parameters()):
+            return _CandidateResult(False, "non-finite candidate weights", None, {}, {})
         last_loss = loss
         last_components = components
         last_sft_replay_loss = sft_replay_loss
@@ -1166,12 +1209,10 @@ def _train_ppo_candidate(
                 stream_unit.observation,
                 post_state,
                 speech_teacher_codes=item.codes.to(device),
-                speech_teacher_mode=item.mode.to(device),
             )
             post_state = output.state
             speech_logprob = _policy_logprobs(
                 output,
-                item.mode.to(device),
                 item.codes.to(device),
                 sampling,
             )
@@ -1197,7 +1238,7 @@ def _train_ppo_candidate(
             "candidate reference KL gate failed: "
             f"{float(post_reference_kl):.6g} > "
             f"{config.training.rl.candidate_max_reference_kl:.6g}",
-            {},
+            None,
             {},
             metrics,
         )
@@ -1207,29 +1248,41 @@ def _train_ppo_candidate(
             "candidate SFT preservation gate failed: "
             f"{float(eval_ratio):.6g} > "
             f"{config.training.rl.candidate_max_eval_loss_ratio:.6g}",
-            {},
+            None,
             {},
             metrics,
         )
-    return _CandidateResult(
-        True,
-        None,
-        {name: value.detach().cpu() for name, value in candidate.state_dict().items()},
+    cpu_optimizer = _pytree.tree_map(
+        lambda value: value.detach().cpu() if isinstance(value, torch.Tensor) else value,
         candidate_optimizer.state_dict(),
-        metrics,
     )
+    del candidate_optimizer
+    candidate.zero_grad(set_to_none=True)
+    actor_device = torch.device(config.training.rl.policy_device or device)
+    candidate.to(actor_device).eval()
+    if actor_device.type == "cuda":
+        torch.cuda.synchronize(actor_device)
+    return _CandidateResult(True, None, candidate, cpu_optimizer, metrics)
 
 
 def _apply_candidate_result(
     policy: StreamingLatentLoop,
-    optimizer: torch.optim.Optimizer,
+    optimizer: OptimizerStateSnapshot | torch.optim.Optimizer,
     result: _CandidateResult,
-) -> bool:
+) -> StreamingLatentLoop | None:
     if not result.accepted:
-        return False
-    policy.load_state_dict(result.model_state)
+        return None
+    if result.ready_policy is None:
+        raise ValueError("accepted PPO candidate must already be ready on the actor device")
+    current = policy.state_dict()
+    ready = result.ready_policy.state_dict()
+    if current.keys() != ready.keys() or any(
+        current[name].shape != ready[name].shape or current[name].device != ready[name].device
+        for name in current
+    ):
+        raise ValueError("PPO candidate publication has incompatible policy state")
     optimizer.load_state_dict(result.optimizer_state)
-    return True
+    return result.ready_policy
 
 
 def train_online_ppo(
@@ -1242,10 +1295,10 @@ def train_online_ppo(
 ) -> dict[str, Any]:
     if not resume and not init_from:
         raise ValueError("Online Recurrent PPO requires the final SFT checkpoint as --init-from")
+    _validate_requested_devices(config)
     if config.data.dataset == "canary" and not torch.cuda.is_available():
         raise RuntimeError(
-            "formal Online Recurrent PPO requires a CUDA GPU; "
-            "torch.cuda.is_available() is false"
+            "formal Online Recurrent PPO requires a CUDA GPU; torch.cuda.is_available() is false"
         )
     if config.data.dataset != "synthetic":
         check_readiness(config.runtime.data_path(), config=config)
@@ -1258,8 +1311,9 @@ def train_online_ppo(
     if len(sessions) != 1:
         raise ValueError("one Online Recurrent PPO worker requires exactly one lifetime session")
     seed_everything(config.data.seed)
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    policy = model or StreamingLatentLoop(config.model)
+    device = torch.device(rl.policy_device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    reference_device = torch.device(rl.reference_device or device)
+    policy = model or StreamingLatentLoop(config.model, load_native=False)
     session_id, scenario_id, seed = sessions[0]
     resume_state: dict[str, Any] | None = None
     resume_metadata: CheckpointMetadata | None = None
@@ -1270,8 +1324,7 @@ def train_online_ppo(
         sft_checkpoint = Path(resume_metadata.sft_checkpoint_path).expanduser().resolve()
         if (
             not sft_checkpoint.is_file()
-            or file_sha256(sft_checkpoint)
-            != resume_metadata.reference_checkpoint_sha256
+            or file_sha256(sft_checkpoint) != resume_metadata.reference_checkpoint_sha256
         ):
             raise ValueError("PPO frozen SFT reference checkpoint is unavailable or changed")
     else:
@@ -1282,16 +1335,23 @@ def train_online_ppo(
         raise ValueError("Online Recurrent PPO requires a final supervised SFT checkpoint")
     sft_sha256 = file_sha256(sft_checkpoint)
     initialize_exact_weights(policy, sft_checkpoint)
-    policy = policy.to(device).eval()
-    configure_trainable_parameters(policy, config)
-    optimizer = torch.optim.AdamW(
-        [parameter for parameter in policy.parameters() if parameter.requires_grad],
-        lr=config.training.backbone_learning_rate,
-        weight_decay=config.training.weight_decay,
+    inference_dtype = (
+        torch.bfloat16
+        if config.training.mixed_precision == "bf16" and device.type == "cuda"
+        else torch.float32
     )
-    reference = StreamingLatentLoop(config.model)
+    policy = policy.to(device=device, dtype=torch.float32).eval()
+    configure_trainable_parameters(policy, config)
+    optimizer = OptimizerStateSnapshot(
+        torch.optim.AdamW(
+            [parameter for parameter in policy.parameters() if parameter.requires_grad],
+            lr=config.training.backbone_learning_rate,
+            weight_decay=config.training.weight_decay,
+        )
+    )
+    reference = StreamingLatentLoop(config.model, load_native=False)
     initialize_exact_weights(reference, sft_checkpoint)
-    reference = reference.to(device).eval()
+    reference = reference.to(device=reference_device, dtype=torch.float32).eval()
     for parameter in reference.parameters():
         parameter.requires_grad_(False)
     lineage_id = (
@@ -1399,7 +1459,7 @@ def train_online_ppo(
             config=config.as_dict(),
             expected_metadata=expected_metadata,
         )
-        reference_state = load_reference_recurrent_state(resume, device)
+        reference_state = load_reference_recurrent_state(resume, reference_device)
         if policy_state is None or reference_state is None:
             raise ValueError("PPO checkpoint is missing recurrent serving/reference state")
         next_unit = int(train_state.get("next_unit", -1))
@@ -1416,11 +1476,8 @@ def train_online_ppo(
         speech_history = []
         for item in policy_trace.records:
             sample = item.sample
-            if int(sample["speech_mode"]) == 1:
-                codes = torch.tensor([sample["speech_codes"]], dtype=torch.long)
-                speech_history.append(codes.transpose(1, 2))
-            else:
-                speech_history.clear()
+            codes = torch.tensor([sample["speech_codes"]], dtype=torch.long)
+            speech_history.append(codes)
         observation = env.resume_lifetime_session(
             session_id,
             next_unit,
@@ -1429,7 +1486,7 @@ def train_online_ppo(
     else:
         observation = env.start_lifetime_session(scenario_id, seed, session_id)
         policy_state = policy.initial_state(1, device)
-        reference_state = reference.initial_state(1, device)
+        reference_state = reference.initial_state(1, reference_device)
     last_metrics: dict[str, float] = {}
     finalized_through = int(train_state.get("finalized_through", -1))
     reward_by_unit: dict[int, float] = {}
@@ -1474,27 +1531,28 @@ def train_online_ppo(
                 )
                 terminal_units.add(event.outcome_unit)
         unit = observation_to_stream_unit(observation, config).to(device)
-        with torch.no_grad():
+        with (
+            torch.no_grad(),
+            torch.autocast(
+                device.type,
+                dtype=inference_dtype,
+                enabled=device.type == "cuda" and config.training.mixed_precision != "no",
+            ),
+        ):
             generated = policy.generate_step(unit.observation, policy_state, sampling)
             policy_state = generated.output.state
-            mode, codes = (
-                generated.speech_mode,
-                generated.speech_codes,
-            )
-            speech_logprob = _policy_logprobs(
-                generated.output, mode, codes, sampling
-            )
+            codes = generated.speech_codes
+            speech_logprob = _policy_logprobs(generated.output, codes, sampling)
             reference_output = reference.forward_step(
-                unit.observation,
+                unit.to(reference_device).observation,
                 reference_state,
-                speech_teacher_codes=codes,
-                speech_teacher_mode=mode,
+                speech_teacher_codes=codes.to(reference_device),
             )
             reference_state = reference_output.state
             reference_speech = _policy_logprobs(
-                reference_output, mode, codes, sampling
-            )
-        next_observation, receipt, _ = env.step(observation, mode, codes)
+                reference_output, codes.to(reference_device), sampling
+            ).to(device)
+        next_observation, receipt, actuation = env.step(observation, codes)
         if receipt.infrastructure_failure:
             raise RuntimeError(
                 f"physical rollout infrastructure failure: {receipt.infrastructure_failure}"
@@ -1507,11 +1565,10 @@ def train_online_ppo(
             unit_index=observation.unit_index,
             policy_version=policy_version,
             observation_payload_sha256=record.payload_sha256,
-            sample=_trace_sample(mode, codes),
+            sample=_trace_sample(codes, observation, actuation, config.runtime.playback_delay_ms),
         )
         item = _PPOUnit(
             observation,
-            mode.cpu(),
             codes.cpu(),
             speech_logprob.cpu(),
             generated.output.value.cpu(),
@@ -1533,14 +1590,10 @@ def train_online_ppo(
         lookahead_hash = hashlib.sha256(observation_to_payload(observation)).hexdigest()
         window_store.seal(
             SealedRolloutWindow(
-                window_id=(
-                    f"stale-{attempt:08d}-{units[0].observation.unit_index:012d}"
-                ),
+                window_id=(f"stale-{attempt:08d}-{units[0].observation.unit_index:012d}"),
                 lineage_id=lineage_id,
                 session_id=session_id,
-                policy_version=timeline.records[
-                    units[0].observation.unit_index
-                ].policy_version,
+                policy_version=timeline.records[units[0].observation.unit_index].policy_version,
                 start_unit=units[0].observation.unit_index,
                 end_unit=units[-1].observation.unit_index,
                 observation_chain_sha256=timeline.records[
@@ -1561,20 +1614,21 @@ def train_online_ppo(
         terminal_units.difference_update(stale_indices)
         train_state["dropped_windows"] += 1
 
-    def save_checkpoint() -> tuple[Path, str]:
+    def save_checkpoint(executor: ThreadPoolExecutor | None = None) -> tuple[Path, str]:
         nonlocal parent_checkpoint_sha256, last_checkpoint_update
         train_state["next_unit"] = observation.unit_index
         train_state["finalized_through"] = finalized_through
         train_state["goal_tracker"] = goal_tracker.state_dict()
-        path, digest = manager.save(
-            f"step-{train_state['update']:08d}",
+        snapshot_update = int(train_state["update"])
+        arguments = dict(
             model=policy,
             optimizer=optimizer,
             scheduler=None,
             scaler=None,
             recurrent_state=policy_state.detach(),
             reference_recurrent_state=reference_state.detach(),
-            train_state=train_state,
+            train_state=copy.deepcopy(train_state),
+            rng_state=capture_rng_state(),
             data_cursor=DataCursor(unit=observation.unit_index),
             metadata=_checkpoint_metadata(
                 config,
@@ -1588,9 +1642,22 @@ def train_online_ppo(
             ),
             config=config.as_dict(),
         )
+        name = f"step-{snapshot_update:08d}"
+        if executor is None:
+            path, digest = manager.save(name, **arguments)
+        else:
+            future = executor.submit(manager.save, name, **arguments)
+            checkpoint_units: list[_PPOUnit] = []
+            checkpoint_events: list[str] = []
+            while not future.done():
+                item, event_ids = rollout_one()
+                checkpoint_units.append(item)
+                checkpoint_events.extend(event_ids)
+            path, digest = future.result()
+            seal_stale(checkpoint_units, "checkpointing", checkpoint_events)
         parent_checkpoint_sha256 = digest
-        last_checkpoint_update = int(train_state["update"])
-        tracker.record_checkpoint(path, digest, train_state["update"])
+        last_checkpoint_update = snapshot_update
+        tracker.record_checkpoint(path, digest, snapshot_update)
         return path, digest
 
     completed_normally = False
@@ -1611,7 +1678,14 @@ def train_online_ppo(
                 lookahead_payload_sha256 = hashlib.sha256(
                     observation_to_payload(lookahead_observation)
                 ).hexdigest()
-                with torch.no_grad():
+                with (
+                    torch.no_grad(),
+                    torch.autocast(
+                        device.type,
+                        dtype=inference_dtype,
+                        enabled=device.type == "cuda" and config.training.mixed_precision != "no",
+                    ),
+                ):
                     bootstrap_value = policy.forward_step(
                         observation_to_stream_unit(observation, config).to(device).observation,
                         policy_state,
@@ -1627,9 +1701,7 @@ def train_online_ppo(
                     pending_units.append(item)
                     pending_reward_event_ids.extend(event_ids)
                     reward_event_ids.extend(event_ids)
-                seal_stale(
-                    pending_units, "reward_pending", pending_reward_event_ids
-                )
+                seal_stale(pending_units, "reward_pending", pending_reward_event_ids)
                 train_state["candidate_attempts"] += 1
                 attempt = int(train_state["candidate_attempts"])
                 window_store.seal(
@@ -1640,9 +1712,7 @@ def train_online_ppo(
                         policy_version=policy_version,
                         start_unit=units[0].observation.unit_index,
                         end_unit=window_end,
-                        observation_chain_sha256=timeline.records[
-                            window_end
-                        ].chain_sha256,
+                        observation_chain_sha256=timeline.records[window_end].chain_sha256,
                         finalized_through_unit=finalized_through,
                         reward_event_ids=tuple(dict.fromkeys(reward_event_ids)),
                         consumed_units=len(units),
@@ -1651,21 +1721,16 @@ def train_online_ppo(
                     )
                 )
                 rewards = tuple(
-                    reward_by_unit.pop(item.observation.unit_index, 0.0)
-                    for item in units
+                    reward_by_unit.pop(item.observation.unit_index, 0.0) for item in units
                 )
                 bootstrap_masks = tuple(
-                    0.0 if item.observation.unit_index in terminal_units else 1.0
-                    for item in units
+                    0.0 if item.observation.unit_index in terminal_units else 1.0 for item in units
                 )
-                terminal_units.difference_update(
-                    item.observation.unit_index for item in units
-                )
-                candidate_snapshot = copy.deepcopy(policy)
+                terminal_units.difference_update(item.observation.unit_index for item in units)
                 future: Future[_CandidateResult] = pool.submit(
                     _train_ppo_candidate,
-                    candidate_snapshot,
-                    copy.deepcopy(optimizer.state_dict()),
+                    policy,
+                    optimizer.state_dict(),
                     tuple(units),
                     lookahead_observation,
                     window_start_state,
@@ -1686,9 +1751,7 @@ def train_online_ppo(
                     stale_units.append(stale_item)
                     stale_reward_event_ids.extend(event_ids)
                 result = future.result()
-                seal_stale(
-                    stale_units, "candidate_training", stale_reward_event_ids
-                )
+                seal_stale(stale_units, "candidate_training", stale_reward_event_ids)
                 last_metrics = {
                     **result.metrics,
                     "rl/finalization_lag_units": float(
@@ -1698,7 +1761,10 @@ def train_online_ppo(
                     "rl/sealed_windows": float(train_state["candidate_attempts"]),
                     "rl/dropped_windows": float(train_state["dropped_windows"]),
                 }
-                if _apply_candidate_result(policy, optimizer, result):
+                published_policy = _apply_candidate_result(policy, optimizer, result)
+                if published_policy is not None:
+                    policy = published_policy
+                    result.optimizer_state.clear()
                     train_state["update"] += 1
                     train_state["consecutive_rejections"] = 0
                     policy_version = f"candidate-{train_state['update']:08d}"
@@ -1708,13 +1774,9 @@ def train_online_ppo(
                     train_state["candidate_rejections"] += 1
                     train_state["consecutive_rejections"] += 1
                     last_metrics["rl/candidate_accepted"] = 0.0
-                    if (
-                        train_state["consecutive_rejections"]
-                        >= rl.candidate_max_rejections
-                    ):
+                    if train_state["consecutive_rejections"] >= rl.candidate_max_rejections:
                         raise RuntimeError(
-                            "PPO candidate acceptance failed repeatedly: "
-                            + str(result.reason)
+                            "PPO candidate acceptance failed repeatedly: " + str(result.reason)
                         )
                 if train_state["candidate_attempts"] % config.training.log_every == 0:
                     tracker.log(last_metrics, train_state["update"])
@@ -1722,16 +1784,17 @@ def train_online_ppo(
                     train_state["update"] > 0
                     and train_state["update"] % config.training.checkpoint_every == 0
                     and train_state["update"] != last_checkpoint_update
+                    and train_state["update"] < target_updates
                 ):
-                    checkpoint_path, checkpoint_digest = save_checkpoint()
-        if train_state["update"] != last_checkpoint_update:
-            checkpoint_path, checkpoint_digest = save_checkpoint()
+                    checkpoint_path, checkpoint_digest = save_checkpoint(pool)
         completed_normally = True
     finally:
         if completed_normally and train_state["update"] < config.training.max_updates:
             env.detach()
         else:
             env.close()
+    if train_state["update"] != last_checkpoint_update:
+        checkpoint_path, checkpoint_digest = save_checkpoint()
     assert checkpoint_path is not None and checkpoint_digest is not None
     tracker.finish()
     elapsed = time.perf_counter() - training_started

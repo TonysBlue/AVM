@@ -1,8 +1,13 @@
 # AVM — Audio-Video Model without Text
 
+原生架构：[MiniCPM-o 4.5 AVM](docs/minicpm-native-avm.md)，200 ms、16 kHz输入、
+连续五声学token、无发声分类头，Model Core约8.17B，含冻结声学栈约8.48B。
+正式资源为8×A800 80GB；本地持续验证
+真实原生模块和完整协议，未通过声学时延与数据readiness时正式运行显式失败。
+
 AVM 是面向通用全双工实时 Omni 对话交互的音视频模型研究与训练项目。模型架构基于
 LatentLoop，移除电脑动作能力，保留连续音视频感知、循环状态、长期记忆与直接语音生成。
-模型按固定 80 ms 节拍持续接收混合音频和视频，边听、边看、边说，自主决定回应、静默或停止发声。
+模型按固定 200 ms 节拍持续接收混合音频和视频，边听、边看、边说，自主决定回应、静默或停止发声。
 运行时不以文本为输入输出通道，也不经过 ASR→文本模型→TTS 链路。
 
 当前 Omni 的范围是音视频输入、语音输出，不包含电脑操控、工具调用或视频生成。
@@ -34,9 +39,9 @@ uv run data inspect-model --config configs/canary-gpu-smoke.yaml
 uv run data inspect-model --config configs/canary.yaml
 ```
 
-Canary 与 GPU capacity smoke 使用完全相同的 10,170,811 参数模型和 375-unit horizon。
-后者使用 synthetic 数据，在 RTX 2080 SUPER 8GB 上执行一次完整 FP16 forward、backward、
-AdamW update 与 checkpoint：
+Canary与GPU capacity smoke使用完全相同的8,169,568,767参数和150-unit horizon。
+容量smoke需要目标8卡，执行一次完整forward、backward、AdamW update与checkpoint；
+本机8GB GPU只验证原生模块和显式小维度协议，不能证明完整模型训练容量：
 
 ```bash
 uv run training train --config configs/canary-gpu-smoke.yaml
@@ -58,7 +63,7 @@ uv run data validate-data \
   --shards "$HOME/latentloop-data/datasets/generated/train-*.tar"
 ```
 
-32 轨迹真实 Mimi 过拟合门禁使用 `configs/direct-speech-overfit.yaml`，完整命令和本机
+原生语音过拟合门禁使用 `configs/direct-speech-overfit.yaml`，完整命令和本机
 验收结果见 [`docs/direct-speech.md`](docs/direct-speech.md)。
 
 使用 Ray 的 CPU worker 生成数据：
@@ -74,8 +79,9 @@ uv run data generate-data \
 
 ```bash
 uv run training train --config configs/smoke.yaml
-uv run training train \
-  --config configs/smoke.yaml \
+scripts/run-training.sh \
+  --recipe configs/recipes/smoke.yaml \
+  --run-id smoke-tracking-001 \
   --resume "$HOME/latentloop-data/checkpoints/smoke/step-00000002.pt"
 ```
 
@@ -106,14 +112,14 @@ uv run training train \
 scripts/wandb-local.sh logs
 scripts/wandb-local.sh down
 ```
-直接流式语音使用 80 ms 主时钟与 Mimi 24 kHz codec。实现和运行命令见
+直接流式语音使用200 ms主时钟、原生S3 25 Hz声学token和24 kHz输出。实现和运行命令见
 [`docs/direct-speech.md`](docs/direct-speech.md)。
 
 Canary 数据准备、外部语料许可证锁、离线 CosyVoice/ASR、真实视频适配器及审计门禁见
 [`docs/canary-data.md`](docs/canary-data.md)。本地 fixture 可以在不下载语料和模型的
 情况下跑通准备链：
 
-真实一小时 Canary 的固定数据下载、TTS/ASR、Mimi 编码、训练和 validation/test 评测
+真实一小时Canary的固定数据下载、TTS/ASR、原生S3编码、训练和validation/test评测
 使用统一入口，完整说明见 [`docs/canary-runbook.md`](docs/canary-runbook.md)：
 
 ```bash

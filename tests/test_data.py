@@ -32,7 +32,18 @@ def test_webdataset_episode_round_trip(tmp_path: Path, smoke_config: ProjectConf
     assert len(decoded.units) == len(original.units)
     assert torch.equal(decoded.units[0].speech_codes, original.units[0].speech_codes)
     assert torch.equal(decoded.target_speech, original.target_speech)
-    assert torch.equal(decoded.units[0].speech_mode, original.units[0].speech_mode)
+    assert torch.equal(decoded.units[0].speech_codec_mask, original.units[0].speech_codec_mask)
+
+
+def test_webdataset_preserves_variable_video_geometry(tmp_path, smoke_config) -> None:
+    episode = SyntheticEpisodeDataset(smoke_config.data, smoke_config.model).make_episode(0)
+    episode.units[0].video = torch.rand(1, 3, 224, 448)
+    episode.units[1].video = torch.rand(1, 2, 3, 224, 224)
+    write_episode_shards([episode], tmp_path / "train-%06d.tar")
+    decoded = next(iter(EpisodeShardReader(str(tmp_path / "train-*.tar"),
+                                          smoke_config.data, smoke_config.model)))
+    for before, after in zip(episode.units, decoded.units, strict=True):
+        torch.testing.assert_close(before.video, after.video)
 
 
 def test_validation_rejects_non_monotonic_timestamps(smoke_config: ProjectConfig) -> None:

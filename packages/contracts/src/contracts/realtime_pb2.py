@@ -33,7 +33,7 @@ def _field(
 
 def _build() -> tuple[object, tuple[object, ...]]:
     file = descriptor_pb2.FileDescriptorProto(
-        name="avm_realtime.proto", package="avm.realtime.v1", syntax="proto3"
+        name="avm_realtime_v2.proto", package="avm.realtime.v2", syntax="proto3"
     )
     t = descriptor_pb2.FieldDescriptorProto
     mic = file.message_type.add(name="MicPcm")
@@ -56,22 +56,25 @@ def _build() -> tuple[object, tuple[object, ...]]:
     _field(obs, "timestamp_ms", 3, t.TYPE_UINT64)
     _field(obs, "delta_ms", 4, t.TYPE_UINT32)
     _field(obs, "mic", 5, t.TYPE_MESSAGE)
-    obs.field[-1].type_name = ".avm.realtime.v1.MicPcm"
+    obs.field[-1].type_name = ".avm.realtime.v2.MicPcm"
     _field(obs, "video", 6, t.TYPE_MESSAGE)
-    obs.field[-1].type_name = ".avm.realtime.v1.VideoFrame"
+    obs.field[-1].type_name = ".avm.realtime.v2.VideoFrame"
     speech = file.message_type.add(name="SpeechSignal")
     _field(speech, "sample_rate_hz", 1, t.TYPE_UINT32)
     _field(speech, "channels", 2, t.TYPE_UINT32)
     _field(speech, "encoding", 3, t.TYPE_STRING)
-    _field(speech, "silent", 4, t.TYPE_BOOL)
+    speech.reserved_range.add(start=4, end=5)
     _field(speech, "pcm", 5, t.TYPE_BYTES)
     act = file.message_type.add(name="ActuationSignal")
     _field(act, "protocol_version", 100, t.TYPE_STRING)
     _field(act, "session_id", 1, t.TYPE_STRING)
     _field(act, "unit_index", 2, t.TYPE_UINT64)
     _field(act, "speech", 3, t.TYPE_MESSAGE)
-    act.field[-1].type_name = ".avm.realtime.v1.SpeechSignal"
+    act.field[-1].type_name = ".avm.realtime.v2.SpeechSignal"
     act.reserved_range.add(start=4, end=5)
+    _field(act, "speech_unit_index", 6, t.TYPE_UINT64, proto3_optional=True)
+    _field(act, "play_at_ms", 7, t.TYPE_UINT64, proto3_optional=True)
+    _field(act, "generation_epoch", 8, t.TYPE_UINT64)
     receipt = file.message_type.add(name="EnvironmentReceipt")
     _field(receipt, "session_id", 1, t.TYPE_STRING)
     _field(receipt, "unit_index", 2, t.TYPE_UINT64)

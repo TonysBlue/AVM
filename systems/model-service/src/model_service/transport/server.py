@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import socket
 import threading
@@ -29,6 +30,19 @@ class UnixModelServer:
         if operation == "close_session":
             self.service.close_session(str(request["session_id"]))
             return {"ok": True}
+        if operation == "finish_session":
+            outputs = self.service.finish_session(str(request["session_id"]))
+            return {
+                "ok": True,
+                "actuations": [
+                    base64.b64encode(actuation_to_payload(value)).decode() for value in outputs
+                ],
+            }
+        if operation == "cancel_speech":
+            return {
+                "ok": True,
+                "generation_epoch": self.service.cancel_speech(str(request["session_id"])),
+            }
         raise ValueError("binary signal operations must use the protobuf message boundary")
 
     def serve_forever(self) -> None:
@@ -48,6 +62,7 @@ class UnixModelServer:
     def _serve_connection(self, connection: socket.socket) -> None:
         with connection:
             try:
+
                 def read_exact(size: int) -> bytes:
                     output = bytearray()
                     while len(output) < size:
@@ -71,6 +86,13 @@ class UnixModelServer:
                     connection.sendall(frame(b"P" + actuation_to_payload(output)))
                 else:
                     raise ValueError("unknown Model Service request kind")
-            except (ConnectionError, KeyError, ValueError, RuntimeError) as error:
+            except (
+                ConnectionError,
+                KeyError,
+                ValueError,
+                RuntimeError,
+                OSError,
+                FloatingPointError,
+            ) as error:
                 error_payload = json.dumps({"ok": False, "error": str(error)}).encode()
                 connection.sendall(frame(b"J" + error_payload))

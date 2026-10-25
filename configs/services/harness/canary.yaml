@@ -1,6 +1,6 @@
 environment_id: avm-dialogue
 environment_version: "1"
-protocol_version: avm-realtime-v1
+protocol_version: avm-realtime-v2
 model_service_socket: ~/latentloop-data/runtime/canary/model-service.sock
 control_socket: ~/latentloop-data/runtime/canary/harness-control.sock
 video_max_age_ms: 1000

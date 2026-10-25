@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 from runtime.config import ProjectConfig
+from runtime.native_assets import audit_native_assets, require_native_qualification
 
 from data.curation.common import SPLITS, dataset_path, read_json, read_jsonl, write_json
 
@@ -54,12 +55,39 @@ def check_readiness(
     missing: list[str] = []
     invalid: list[str] = []
     formal_dataset = dataset == "canary"
+    native_audit = None
+    native_qualification = None
+    if formal_dataset:
+        lock = (
+            Path(config.model.native_source_lock).expanduser()
+            if config.model.native_source_lock
+            else None
+        )
+        qualification = (
+            Path(config.model.native_qualification).expanduser()
+            if config.model.native_qualification
+            else None
+        )
+        if lock is None or not lock.is_file():
+            missing.append("locked native MiniCPM model assets")
+        if qualification is None or not qualification.is_file():
+            missing.append("passed native acoustic/timing qualification")
+        if (
+            lock is not None
+            and lock.is_file()
+            and qualification is not None
+            and qualification.is_file()
+        ):
+            try:
+                native_audit = audit_native_assets(lock, model_weights=True)
+                native_qualification = require_native_qualification(native_audit, qualification)
+            except (ValueError, OSError, KeyError) as error:
+                invalid.append(f"native assets/qualification: {error}")
 
     if formal_dataset and config.training.stage == "rl":
         rl = config.training.rl
         for label, value in (
             ("dialogue Harness", rl.environment_socket),
-            ("speech codec", rl.codec_socket),
             ("perceptual Judge", rl.reward_socket),
         ):
             endpoint = Path(value).expanduser() if value else None
@@ -177,12 +205,10 @@ def check_readiness(
                     "environment_version",
                 }
                 if any(required_metadata - set(entry) for entry in encoded_entries):
-                    invalid.append(
-                        f"{split} processed manifest is missing runtime identity"
-                    )
+                    invalid.append(f"{split} processed manifest is missing runtime identity")
                 if any(
-                    entry.get("schema_id") != "avm-episode-v1"
-                    or entry.get("protocol_version") != "avm-realtime-v1"
+                    entry.get("schema_id") != "avm-episode-v2"
+                    or entry.get("protocol_version") != "avm-realtime-v2"
                     for entry in encoded_entries
                 ):
                     invalid.append(f"{split} processed manifest has incompatible AVM identity")
@@ -192,31 +218,47 @@ def check_readiness(
                     invalid.append(f"{split} processed manifest does not match source manifest")
                 if any(not entry.get("speech_codes_encoded") for entry in encoded_entries):
                     invalid.append(f"{split} processed manifest contains unencoded speech")
-    mimi_reports = {}
+                if formal_dataset:
+                    if any(
+                        not entry.get("native_source_lock_sha256")
+                        or not entry.get("target_encoding_context")
+                        for entry in encoded_entries
+                    ):
+                        invalid.append(f"{split} processed manifest lacks native encoding identity")
+                    if native_audit is not None and any(
+                        entry.get("native_source_lock_sha256") != native_audit["source_lock_sha256"]
+                        or entry.get("target_encoding_context")
+                        != native_audit["target_encoding_context"]
+                        for entry in encoded_entries
+                    ):
+                        invalid.append(
+                            f"{split} target encoding identity differs from native assets"
+                        )
+    native_reports = {}
     if formal_dataset:
-        report = path("reports", "mimi-decode.json")
-        _required(report, f"{dataset} Mimi decode report", missing)
+        report = path("reports", "native-decode.json")
+        _required(report, f"{dataset} Native decode report", missing)
         if report.is_file():
-            mimi = read_json(report)
-            mimi_reports[dataset] = mimi
+            native = read_json(report)
+            native_reports[dataset] = native
             source_manifest = path("manifests", "episodes.jsonl")
             from data.curation.common import sha256_file
 
-            if mimi.get("manifest_sha256") != (
+            if native.get("manifest_sha256") != (
                 sha256_file(source_manifest) if source_manifest.is_file() else None
             ):
                 invalid.append(
-                    f"{dataset} Mimi report manifest hash does not match source manifest"
+                    f"{dataset} Native report manifest hash does not match source manifest"
                 )
-            if mimi.get("failed_segments") != 0:
-                invalid.append(f"{dataset} Mimi report contains failed segments")
+            if native.get("failed_segments") != 0:
+                invalid.append(f"{dataset} Native report contains failed segments")
             for field, expected in (
                 ("codec_id", config.data.codec_id),
                 ("codec_revision", config.data.codec_revision),
-                ("mimi_weight_sha256", config.data.codec_weight_hash),
+                ("native_weight_sha256", config.data.codec_weight_hash),
             ):
-                if mimi.get(field) != expected:
-                    invalid.append(f"{dataset} Mimi report {field} differs from config")
+                if native.get(field) != expected:
+                    invalid.append(f"{dataset} Native report {field} differs from config")
     if require_checkpoint:
         checkpoint = Path(require_checkpoint).expanduser()
         _required(checkpoint, "initial checkpoint", missing)
@@ -224,7 +266,7 @@ def check_readiness(
             try:
                 payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
                 metadata = payload.get("metadata", {})
-                if metadata.get("model_schema_id") != "avm-model-v2":
+                if metadata.get("model_schema_id") != "avm-model-v3":
                     invalid.append("initial checkpoint is not an AVM model")
                 if metadata.get("codec_id") != config.data.codec_id:
                     invalid.append("initial checkpoint codec_id differs from Canary config")
@@ -248,7 +290,9 @@ def check_readiness(
         "invalid": invalid,
         "manifests": {split: str(path) for split, path in manifest_paths.items()},
         "shards": {split: [str(path) for path in paths] for split, paths in shard_paths.items()},
-        "mimi_reports": mimi_reports,
+        "native_reports": native_reports,
+        "native_assets": native_audit,
+        "native_qualification": native_qualification,
         "free_disk_bytes": disk.free,
     }
     write_json(path("reports", "readiness.json"), result)

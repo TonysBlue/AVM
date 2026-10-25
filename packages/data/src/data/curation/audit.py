@@ -27,9 +27,9 @@ from data.curation.common import (
 from data.curation.spec import (
     CATEGORY_FRACTIONS,
     LANGUAGE_FRACTIONS,
-    MIMI_CODEC_ID,
-    MIMI_REVISION,
-    MIMI_WEIGHT_SHA256,
+    NATIVE_CODEC_ID,
+    NATIVE_REVISION,
+    NATIVE_WEIGHT_SHA256,
     SPLIT_FRACTIONS,
     dataset_spec,
 )
@@ -93,7 +93,7 @@ def _validate_record(root: Path, record: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("mic and target audio timelines differ")
     timeline_samples = int(metrics["mic_audio"]["samples"])
     if timeline_samples % FRAME_SAMPLES:
-        raise ValueError("episode timeline is not aligned to the 80 ms clock")
+        raise ValueError("episode timeline is not aligned to the 200 ms clock")
     previous_stop = -1
     starts = 0
     stops = 0
@@ -112,7 +112,7 @@ def _validate_record(root: Path, record: dict[str, Any]) -> dict[str, Any]:
         start = int(segment["start_sample"])
         end = int(segment["end_sample"])
         if start % FRAME_SAMPLES:
-            raise ValueError("assistant START is not on an 80 ms boundary")
+            raise ValueError("assistant START is not on an 200 ms boundary")
         final_frame = (end - 1) // FRAME_SAMPLES
         stop_frame = final_frame + 1
         if start < 0 or end <= start or stop_frame * FRAME_SAMPLES >= timeline_samples:
@@ -259,13 +259,13 @@ def _validate_text_plan(root: Path, dataset: str, fixture: bool) -> dict[str, An
     }
 
 
-def _mimi_report(
+def _native_report(
     root: Path, dataset: str, fixture: bool, path: str | Path | None
 ) -> dict[str, Any]:
     report_path = (
         Path(path).expanduser()
         if path
-        else dataset_path(root, dataset, "reports", "mimi-decode.json")
+        else dataset_path(root, dataset, "reports", "native-decode.json")
     )
     if fixture and not report_path.exists():
         return {"required": False, "checked_segments": 0, "path": str(report_path)}
@@ -273,15 +273,15 @@ def _mimi_report(
         report = read_json(report_path)
         return {"required": False, **report, "path": str(report_path)}
     if not report_path.is_file():
-        raise ValueError(f"Mimi decode-check report is required: {report_path}")
+        raise ValueError(f"Native decode-check report is required: {report_path}")
     report = read_json(report_path)
     if int(report.get("checked_segments", 0)) < 100 or int(report.get("failed_segments", 0)):
-        raise ValueError("Mimi decode-check requires at least 100 successful target segments")
-    weight_hash = require_sha256(report.get("mimi_weight_sha256"), "Mimi weight")
-    if weight_hash != MIMI_WEIGHT_SHA256:
-        raise ValueError("Mimi decode-check used an unexpected weight identity")
-    if report.get("codec_id") != MIMI_CODEC_ID or report.get("codec_revision") != MIMI_REVISION:
-        raise ValueError("Mimi decode-check codec identity does not match the Canary config")
+        raise ValueError("Native decode-check requires at least 100 successful target segments")
+    weight_hash = require_sha256(report.get("native_weight_sha256"), "Native weight")
+    if weight_hash != NATIVE_WEIGHT_SHA256:
+        raise ValueError("Native decode-check used an unexpected weight identity")
+    if report.get("codec_id") != NATIVE_CODEC_ID or report.get("codec_revision") != NATIVE_REVISION:
+        raise ValueError("Native decode-check codec identity does not match the Canary config")
     return report
 
 
@@ -289,7 +289,7 @@ def audit_canary_data(
     root: str | Path,
     *,
     fixture: bool = False,
-    mimi_report: str | Path | None = None,
+    native_report: str | Path | None = None,
 ) -> dict[str, Any]:
     dataset = "canary"
     root = Path(root).expanduser().resolve()
@@ -395,10 +395,10 @@ def audit_canary_data(
             require_sha256(source.get("license_sha256"), "source license")
         require_sha256(text_plan["sha256"], "text plan")
     quality = _automatic_quality_report(dataset, records, duration)
-    mimi = _mimi_report(root, dataset, fixture, mimi_report)
+    native = _native_report(root, dataset, fixture, native_report)
     manifest_hash = sha256_file(manifest_path)
-    if not fixture and mimi.get("manifest_sha256") != manifest_hash:
-        raise ValueError("Mimi decode-check report does not cover this manifest")
+    if not fixture and native.get("manifest_sha256") != manifest_hash:
+        raise ValueError("Native decode-check report does not cover this manifest")
     license_records = {}
     for record in records:
         key = (record["source"], record["source_version"], record["license_sha256"])
@@ -421,7 +421,7 @@ def audit_canary_data(
         "asr": asr,
         "leakage": leaks,
         "automatic_quality": quality,
-        "mimi_decode": mimi,
+        "native_decode": native,
         "text_plan": text_plan,
         "rows": quality_rows,
     }

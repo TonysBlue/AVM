@@ -1,5 +1,9 @@
 # Online RL：Online Recurrent PPO 与实时音视频对话环境
 
+> 原生接口契约（2026-10-25）：MiniCPM-o 4.5 原生规模、200 ms、16 kHz输入、
+> 连续五声学token、原生Token2Wav、8×A800 80GB。细节见[原生AVM契约](minicpm-native-avm.md)。
+> 正式运行仍要求真实资产、声学资格和数据readiness通过；本地测试不构成8卡性能证据。
+
 > 状态：最终目标 Online RL 阶段、Online Recurrent PPO 算法与环境协议
 > 日期：2026-08-29
 > 关联文档：[统一三阶段训练架构](three-stage-training.md) · [AVM 契约](avm-contract.md) · [物理 Rollout 闭环](protocols/physical-rollout.md)
@@ -42,7 +46,7 @@ $$
 $$
 
 `C_t` 不直接进入语音头，但通过 Backbone 影响 `H_t`。Reward、receipt、Judge 和任务
-成功信息只进入 Training System，不进入 `ObservationSignal`。PPO candidate 在 375-unit
+成功信息只进入 Training System，不进入 `ObservationSignal`。PPO candidate 在 150-unit
 recurrent window 上重放完整状态，更新 Encoder、Perceiver、Backbone、语义 memory、
 SlowMemory write controller 及输出头；通过 finite、reference-KL 和 SFT preservation
 门禁后才在 unit 边界原子切换。checkpoint 必须保存 `H/C/RecentKV/SlowMemory` 及
@@ -75,7 +79,7 @@ close_lifetime_session(session_id)
 ```text
 timestamp_ms
 delta_ms
-mixed_microphone[1920]
+mixed_microphone[3200]
 video[3,224,224]
 ```
 
@@ -125,7 +129,7 @@ model ID/revision 一起写入配置和 checkpoint；`unconfigured` 或 hash 不
 当前 serving policy 在固定窗口内连续运行并记录 recurrent state、sampled speech、old
 log-prob、value 和 policy version。窗口只有在 reward finalization watermark 覆盖可归因
 事件且没有 infrastructure failure 时封存。旧 policy 继续服务，候选 policy 后台训练；
-候选通过验证后在 80 ms unit 边界原子切换。切换只原子替换模型参数和 optimizer
+候选通过验证后在 200 ms unit 边界原子切换。切换只原子替换模型参数和 optimizer
 状态；serving policy 在该边界已经形成的完整 recurrent state（包括 C/H/RecentKV/SlowMemory、audio cache、
 Speech local state 和 unit cursor）原样继承给新参数，不能 reset，也不能用有限观察
 历史反事实重算。有限历史无法恢复早期时间线累积进 C/H/SlowMemory 的长期信息，并破坏跨帧语音连续性。
@@ -180,17 +184,15 @@ $$
 y_t = A_t + V_t
 $$
 
-每个 unit 的 speech mode 与有效 codec token 联合形成唯一策略概率，计算一次 ratio：
+每unit的五个实际声学token构成一个联合动作，静音也参与，计算一次ratio：
 
 $$
-\log \pi_{\mathrm{speech},t}
-= \log \pi(m_t\mid s_t)
-{}+ \mathbf{1}_{\{m_t=\mathrm{speech}\}}
-\sum_q \log \pi(c_{t,q}\mid s_t,m_t,c_{t,<q})
+\log\pi_{\mathrm{speech},t} = \sum_{i=1}^{5}
+\log\pi(a_{t,i}\mid H_t,a_{t,<i},\mathrm{speech\_local}_{t-1})
 $$
 
-Speech mode 与当前 unit 所有有效 codec token 构成一个联合动作，因此这里必须求和，不能按
-token 数取平均；否则 PPO ratio 与 reference KL 会随 codebook 数被错误缩放。
+每项使用与实际采样相同的温度和EOS排除约束；联合log-prob求和，不按token数取平均。
+原生声学前瞻和PCM留尾不改变策略动作归属，trace同时记录条件unit、输出来源unit与计划播放时间。
 
 $$
 \rho_t
@@ -253,7 +255,7 @@ client，保留 Harness、环境与 codec session 供同一 checkpoint 恢复。
 
 ## 9. Canary 本机规模参数
 
-Canary 的 window 固定为 375 units，正式语义是一个智能体、一个 active lifetime session、
+Canary 的 window 固定为 150 units，正式语义是一个智能体、一个 active lifetime session、
 一条连续时间线。本机验证记录窗口封存/丢弃数、candidate 接纳/拒绝、finalization lag、
 reward、吞吐和峰值显存。多环境并行代表多个智能体/生命期，不属于这套单智能体自学习契约，
 不能作为吞吐优化暗中引入。后续规模不得通过复制 RL 循环实现；必须基于 Canary 证据重新

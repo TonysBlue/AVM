@@ -6,6 +6,8 @@ dependencies = [
   "numpy>=1.26,<3",
   "pyarrow==23.0.1",
   "soundfile>=0.13,<1",
+  "scipy>=1.14,<2",
+  "pillow>=11,<13",
 ]
 
 [tool.uv]

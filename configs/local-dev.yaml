@@ -3,7 +3,7 @@ model:
   num_layers: 8
   num_heads: 8
   ffn_dim: 768
-  audio_tokens: 4
+  audio_tokens: 2
   audio_kernel: 400
   audio_stride: 160
   vision_tokens: 16
@@ -13,51 +13,71 @@ model:
   semantic_memory_slots: 8
   slow_memory_type: gated_delta
   rematerialization_segment_units: 32
-  kv_units: 375
+  kv_units: 150
   kv_window_ms: 30000
-  speech_frames_per_unit: 1
-  speech_codebooks: 8
-  speech_codebook_size: 2048
+  speech_frames_per_unit: 5
+  speech_codebooks: 1
+  speech_codebook_size: 32
   speech_depth_layers: 2
   speech_depth_heads: 4
-  speech_depth_ffn_dim: 384
+  speech_depth_ffn_dim: 96
   dropout: 0.1
   activation_checkpointing: false
+  kv_heads: 2
+  audio_dim: 32
+  audio_layers: 2
+  audio_heads: 4
+  audio_ffn_dim: 96
+  audio_cache_frames: 40
+  vision_dim: 32
+  vision_layers: 2
+  vision_heads: 4
+  vision_ffn_dim: 96
+  vision_patch_size: 56
+  vision_position_grid: 4
+  perceiver_dim: 32
+  perceiver_heads: 4
+  perceiver_ffn_dim: 96
+  jepa_dim: 32
+  jepa_heads: 4
+  jepa_ffn_dim: 96
+  speech_dim: 32
+  speech_window_units: 2
 data:
   dataset: synthetic
   source: synthetic
-  audio_sample_rate: 24000
-  codec_frame_rate: 12.5
-  codec_id: mimi-24khz-8x2048
-  codec_weight_hash: 09b782f0629851a271227fb9d36db65c041790365f11bbe5d3d59369cf863f50
-  codec_revision: a49141e28b3d9c947cf9aa5314431e1b11cbd2f5
-  codec_codebooks: 8
-  codec_codebook_size: 2048
-  unit_ms: 80
-  unit_audio_samples: 1920
+  audio_sample_rate: 16000
+  codec_frame_rate: 25.0
+  codec_id: synthetic-codec-v1
+  codec_weight_hash: synthetic
+  codec_revision: synthetic
+  codec_codebooks: 1
+  codec_codebook_size: 32
+  unit_ms: 200
+  unit_audio_samples: 3200
   video_height: 224
   video_width: 224
-  episode_units: 375
+  episode_units: 150
   train_episodes: 1000
   seed: 17
 training:
   max_updates: 10000
   weight_decay: 0.1
   gradient_accumulation_steps: 16
-  tbptt_units: 375
+  tbptt_units: 150
   mixed_precision: fp16
   max_grad_norm: 1.0
   checkpoint_every: 500
   log_every: 10
   head_learning_rate: 0.0001
-  backbone_learning_rate: 0.00003
+  backbone_learning_rate: 3.0e-05
   warmup_ratio: 0.03
   codec_scheduled_sampling: 0.25
   codec_scheduled_sampling_start: 0.7
   backbone_train_mode: frozen
   speech_loss_weight: 1.0
   jepa_loss_weight: 1.0
-  memory_horizon_units: 375
+  memory_horizon_units: 150
   min_learning_rate_ratio: 0.1
 tracking:
   enabled: true
@@ -68,5 +88,6 @@ tracking:
   media_warning_gb: 40
   media_stop_gb: 50
 runtime:
+  clock_kind: logical_fixture
   data_root: ~/latentloop-data/datasets
   experiment_root: ~/latentloop-data/experiments/local-dev/default

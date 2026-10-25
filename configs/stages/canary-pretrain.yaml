@@ -1,9 +1,10 @@
 defaults:
-  - ../canary
-  - _self_
+- ../canary
+- _self_
 training:
   stage: pretrain
   max_updates: 1000
   backbone_train_mode: all
+  mixed_precision: bf16
 runtime:
   run_name: canary-pretrain

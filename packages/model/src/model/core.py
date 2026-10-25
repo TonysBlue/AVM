@@ -1,4 +1,4 @@
 from model.latentloop import StreamingLatentLoop
-from model.speech import FactorizedSpeechHead
+from model.speech import NativeSpeechHead
 
-__all__ = ["FactorizedSpeechHead", "StreamingLatentLoop"]
+__all__ = ["NativeSpeechHead", "StreamingLatentLoop"]

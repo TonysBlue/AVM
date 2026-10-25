@@ -6,21 +6,21 @@ from dataclasses import dataclass
 @dataclass(frozen=True, slots=True)
 class MicSignal:
     samples: bytes
-    sample_rate_hz: int = 24_000
+    sample_rate_hz: int = 16_000
     channels: int = 1
     encoding: str = "pcm_f32le"
 
     def __post_init__(self) -> None:
-        if self.sample_rate_hz != 24_000 or self.channels != 1:
-            raise ValueError("the realtime audio clock requires 24 kHz mono")
+        if self.sample_rate_hz != 16_000 or self.channels != 1:
+            raise ValueError("the realtime microphone clock requires 16 kHz mono")
         if self.encoding not in {"pcm_f32le", "pcm_s16le"}:
             raise ValueError("unsupported microphone encoding")
         if not self.samples:
             raise ValueError("microphone samples are required")
         bytes_per_sample = 4 if self.encoding == "pcm_f32le" else 2
-        expected = round(self.sample_rate_hz * 0.08) * self.channels * bytes_per_sample
+        expected = 3200 * bytes_per_sample
         if len(self.samples) != expected:
-            raise ValueError("microphone PCM must contain exactly one 80 ms unit")
+            raise ValueError("microphone PCM must contain exactly one 200 ms unit")
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,5 +64,5 @@ class ObservationSignal:
             raise ValueError("video frame cannot be from the future")
         if not self.session_id:
             raise ValueError("session_id is required")
-        if self.unit_index < 0 or self.timestamp_ms < 0 or self.delta_ms != 80:
+        if self.unit_index < 0 or self.timestamp_ms < 0 or self.delta_ms != 200:
             raise ValueError("invalid observation clock")

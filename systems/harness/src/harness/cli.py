@@ -75,6 +75,6 @@ def main(argv: list[str] | None = None) -> int:
         socket_path,
         expected_environment_id=str(raw.get("environment_id", "")) or None,
         expected_environment_version=str(raw.get("environment_version", "")) or None,
-        expected_protocol_version=str(raw.get("protocol_version", "avm-realtime-v1")),
+        expected_protocol_version=str(raw.get("protocol_version", "avm-realtime-v2")),
     ).serve_forever()
     return 0

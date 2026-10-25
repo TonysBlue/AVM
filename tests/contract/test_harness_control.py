@@ -28,8 +28,8 @@ class FakeBackend:
             session_id,
             0,
             0,
-            80,
-            MicSignal(b"x" * 7680),
+            200,
+            MicSignal(b"x" * 12800),
             VideoSignal(b"rgb", 1, 1, captured_at_ms=0, revision=0),
         )
 
@@ -38,9 +38,9 @@ class FakeBackend:
             ObservationSignal(
                 output.session_id,
                 output.unit_index + 1,
-                80,
-                80,
-                MicSignal(b"x" * 7680),
+                200,
+                200,
+                MicSignal(b"x" * 12800),
                 VideoSignal(b"rgb", 1, 1, captured_at_ms=0, revision=0),
             ),
             EnvironmentReceipt(output.session_id, output.unit_index, True),
@@ -72,7 +72,7 @@ def test_harness_control_socket_uses_physical_signals(tmp_path) -> None:
     client = HarnessControlClient(str(path))
     assert client.identity()["environment_id"] == "avm-dialogue"
     assert client.start_lifetime_session("conversation", 7, "session").unit_index == 0
-    output = ActuationSignal("session", 0, SpeechSignal(b"y" * 7680, silent=True))
+    output = ActuationSignal("session", 0, SpeechSignal(b"y" * 19200))
     next_observation, receipt = client.apply(output)
     assert next_observation.unit_index == 1
     assert receipt.accepted
@@ -116,7 +116,7 @@ def test_harness_control_rejects_order_errors_and_duplicate_lifetime_session() -
                 "session_id": "session",
                 "actuation": base64.b64encode(
                     actuation_to_payload(
-                        ActuationSignal("session", 4, SpeechSignal(b"y" * 7680, silent=True))
+                        ActuationSignal("session", 4, SpeechSignal(b"y" * 19200))
                     )
                 ).decode(),
             }

@@ -1,5 +1,9 @@
 # AVM 本地训练平台与工程实施方案
 
+> 原生接口契约（2026-10-25）：MiniCPM-o 4.5 原生规模、200 ms、16 kHz输入、
+> 连续五声学token、原生Token2Wav、8×A800 80GB。细节见[原生AVM契约](minicpm-native-avm.md)。
+> 正式运行仍要求真实资产、声学资格和数据readiness通过；本地测试不构成8卡性能证据。
+
 > 状态：最终目标工程契约
 > 日期：2026-08-20
 > 关联顶层架构：[实时流多模态 LatentLoop 完整方案](realtime-multimodal-latent-loop.md)
@@ -30,7 +34,7 @@ $$
 $H_t$ 随后同时进入 Speech Head；训练使用 masked loss 与
 TBPTT，并把结果写入带 lineage 的原子 checkpoint。
 
-PyTorch 负责模型、递归状态、loss、优化和 checkpoint；WebDataset 负责按 episode 顺序提供 unit；Ray 负责 CPU 数据与环境外围任务；W&B Local 负责指标和谱系。RecentKV、C、SlowMemory、H、audio cache 和两个 local state 保留在同一 GPU 进程。
+PyTorch 负责模型、递归状态、loss、优化和 checkpoint；WebDataset 负责按 episode 顺序提供 unit；Ray 负责 CPU 数据与环境外围任务；W&B Local 负责指标和谱系。RecentKV、C、SlowMemory、H、audio cache与speech-local由同一模型进程管理，可按层分配设备。
 
 ## 2. 当前环境与约束
 
@@ -125,14 +129,14 @@ Canary、Smoke 和 direct-speech gate 使用同一个 train/recipe/evaluate 代�
 
 ### 5.1 统一时间轴
 
-生产 unit 为 80 ms：
+生产 unit 为 200 ms：
 
 ```text
-unit_ms            = 80
-audio_sample_rate  = 24000
-audio_samples      = 1920
-codec_frame_rate   = 12.5
-codec_frames/unit  = 1
+unit_ms            = 200
+audio_sample_rate  = 16000
+audio_samples      = 3200
+codec_frame_rate   = 25
+codec_frames/unit  = 5
 ```
 
 ### 5.2 StreamUnit
@@ -144,13 +148,11 @@ class StreamUnit:
     delta_ms: Tensor
     mic_audio: Tensor
     video: Tensor
-    speech_mode: Tensor
-    speech_mode_mask: Tensor
     speech_codes: Tensor
     speech_codec_mask: Tensor
 ```
 
-`video` 始终为当前 224x224 RGB 像素；低帧率复用最新因果帧，缺失或失效显式失败。静态与动态画面
+`video` 始终为保持原生画幅比例的RGB像素；低帧率复用最新因果帧，缺失或失效显式失败。静态与动态画面
 使用同一视觉编码路径。`delta_ms` 为正，时间戳严格递增；所有 target 都有对应 mask。
 
 ### 5.3 编码和状态顺序
@@ -172,12 +174,12 @@ $$
 $$
 
 
-`P_t` 和 `H_t` 都保存16个 slots，H_t 不能被 pooled summary 替代。audio cache 是
+`P_t`和`H_t`都保存64个slots，H_t不能被pooled summary替代。audio cache是
 Perceiver 流式输入状态，不进入顶层认知状态公式。
 
 ### 5.4 Codec 时间对齐
 
-每个 unit 固定一帧 Mimi code。音频、完整视频帧、speech mask 都按照同一 unit 时钟对齐，不允许累计四舍五入。
+每个unit固定五个原生声学code，含静音。音频、完整视频帧、speech mask 都按照同一 unit 时钟对齐，不允许累计四舍五入。
 
 ## 6. 公共训练接口
 
@@ -203,13 +205,11 @@ class RecurrentState:
 @dataclass
 class StepOutput:
     state: RecurrentState
-    speech_mode_logits: Tensor
     speech_codec_logits: Tensor
     hidden: Tensor
     perceiver_slots: Tensor
     jepa_prediction: Tensor
     value: Tensor
-    selected_speech_mode: Tensor
 ```
 
 forward 不执行操作系统动作、W&B 网络调用或全局 session 读取。
@@ -219,12 +219,13 @@ forward 不执行操作系统动作、W&B 网络调用或全局 session 读取�
 codec identity 必须包含：
 
 ```text
-codec_id = mimi-24khz-8x2048
-sample_rate = 24000
-frame_rate = 12.5
-frame_samples = 1920
-codebooks = 8
-codebook_size = 2048
+codec_id = minicpm-o-4_5-s3-25hz
+input_sample_rate = 16000
+output_sample_rate = 24000
+frame_rate = 25
+samples_per_acoustic_token = 960 (24 kHz)
+codebooks = 1
+codebook_size = 6562 (EOS excluded)
 revision
 weight_sha256
 ```
@@ -236,7 +237,7 @@ weight_sha256
 ### 7.1 数据流
 
 ```text
-MIC_MIXED + SCREEN + TIME
+MIC_MIXED + VIDEO
         -> Perceiver(P_t)
 P_t + H_(t-1) + C_(t-1) + RecentKV_(t-1) + SlowMemory_(t-1)
         -> Streaming Backbone -> H_t, C_t, RecentKV_t, SlowMemory_t
@@ -254,7 +255,7 @@ Perceiver(O_(t+1)) -> stop-gradient JEPA target
 所有正式 GPU profile 固定 `perceiver_slots=16`、`perceiver_layers=2`，并显式配置
 `semantic_memory_slots` 与 `jepa_layers`。Canary GPU smoke 与 Canary 使用完全相同的模型形状、
 KV horizon 和 JEPA 拓扑，只缩小合成数据量、update 数与 tracking 预算。快速 CPU fixture 可以
-缩小模型和 horizon，但不构成容量验证。JEPA Head 只读取 H，预测一个 80 ms 后的同形
+缩小模型和 horizon，但不构成容量验证。JEPA Head 只读取 H，预测一个 200 ms 后的同形
 Perceiver 表征；C 不直接进入任何输出 head。
 
 ### 7.3 语义 slots 与 SlowMemory
@@ -274,12 +275,12 @@ $C_t$ 和 SlowMemory 都没有独立 target、probe、write 或 diversity loss�
 ### 7.4 固定节拍与时间元数据
 
 模型输入 AudioVideoInput 仅包含 mic_audio 和 video。StreamUnit 是训练数据封装，
-其中 timestamp_ms 和 delta_ms 仅为轨迹元数据，不进入感知编码器。模型固定每步 80 ms，
+其中 timestamp_ms 和 delta_ms 仅为轨迹元数据，不进入感知编码器。模型固定每步 200 ms，
 通过顺序位置和循环状态表达时序；没有时间 token 或时间编码参数。
 
 ### 7.4 Speech Head
 
-每 80 ms 预测 mode 和一帧 Mimi codec。SILENCE unit 的 codec mask 为 false；speech local 只负责声学连续性。
+每200 ms生成五个声学token，静音仍有完整codec监督；speech local 只负责声学连续性。
 
 ### 7.5 AVM 输出边界
 
@@ -290,7 +291,7 @@ AVM 继承 LatentLoop 主干并删除动作输出；Speech Head 是唯一运行�
 
 ### 8.1 两类 Smoke
 
-`configs/canary-gpu-smoke.yaml` 是正式容量 smoke：模型全部形状字段、375-unit RecentKV、
+`configs/canary-gpu-smoke.yaml` 是正式容量 smoke：模型全部形状字段、150-unit RecentKV、
 TBPTT 和 memory horizon 与 Canary 完全相同，只使用显式 synthetic 数据并把 optimizer update
 缩到 1。它必须在本机 GPU 上真实完成 forward、backward、optimizer step、checkpoint，并要求
 所有训练 loss 有限。
@@ -310,14 +311,15 @@ Local profile 用于单 GPU 实验，正式容量结论以 Canary GPU smoke 为�
 
 ### 8.3 Canary 正式契约
 
-Canary profile 使用 10,170,811 参数的 192 宽、8 层 Backbone，8 heads、768 FFN、16 个
-Perceiver slots、8 个共享语义 slots，以及正式 codec 与 trajectory schema。RecentKV、
-memory horizon、TBPTT 和 PPO window 均为 375 units（30 秒）。该规格按最重的 Online RL
-阶段选择：RTX 2080 SUPER 8 GiB 上，完整 375-unit rollout、冻结 reference、candidate 两个
-PPO epoch、SFT replay/preservation 和 optimizer update 的实测峰值 allocated 约 5.30 GiB、
-reserved 约 6.35 GiB。256 宽在 candidate backward OOM，224 宽仅剩不足 1 GiB，因此不采用。
-Online RL candidate 阶段由训练进程独占本机 GPU；Mimi worker 使用 CPU 或另一设备，不能与
-candidate 争抢同一张 8 GiB GPU。
+Canary使用原生MiniCPM-o 4.5的完整非文本模块参数和AVM循环结构：4096维36层Qwen3、
+原生音频/视觉/语音模块、64工作slots、16语义slots、两层Perceiver与两层JEPA。
+RecentKV、TBPTT、memory horizon与PPO window均为150 units（30秒），模型参数8,169,568,767。
+
+Pretrain/SFT通过单进程按层模型并行覆盖8×A800 80GB；RL按policy GPU0、声学GPU1、
+reference GPU2和candidate GPU3—7分配。边界copy保留梯度，optimizer状态驻留candidate各层
+设备，actor只保存CPU快照。建议主机RAM至少256GB，正式BF16计算与FP32优化器参数。
+当前本机RTX2080 SUPER只做分模块原生验证和小维度协议测试；8卡显存、吞吐与实时质量
+未验证。早期192维/Mimi的5.30 GiB实验属于退役架构，不能作为原生规模容量证据。
 
 ## 9. 数据格式
 
@@ -370,15 +372,14 @@ reset 或把递归 state 移出训练进程。
 ### 10.2 优化配置
 
 optimizer、学习率、梯度累积、FP16、梯度裁剪和 checkpoint cadence 由配置定义。Canary 与
-Canary GPU smoke 的 `tbptt_units` 和 `memory_horizon_units` 均为 375；快速 CPU fixture 可缩小，
+Canary GPU smoke 的 `tbptt_units` 和 `memory_horizon_units` 均为150；快速 CPU fixture 可缩小，
 但不能换代码路径或充当容量证据。
 
 ### 10.3 Loss 契约
 
 $$
 \mathcal{L}_{\mathrm{speech}}
-= \mathcal{L}_{\mathrm{speech\_mode}}
-{}+ \mathcal{L}_{\mathrm{speech\_codec}}
+= \mathcal{L}_{\mathrm{speech\_codec}}
 $$
 
 
@@ -394,14 +395,14 @@ $$
 {}+ w_{\mathrm{JEPA}}^{(\mathrm{stage})}\mathcal{L}_{\mathrm{JEPA}}
 $$
 
-SILENCE unit 的 codec loss 被 mask，PPO 概率同样排除无效 codec token。C 与 SlowMemory 没有 memory probe、write-budget、
+静音unit保留五token CE和联合策略概率，只有缺失标签被mask。C 与 SlowMemory 没有 memory probe、write-budget、
 diversity、control 或 confidence loss；JEPA 是 JEPA Head 的单步表示目标，不是独立 memory target。
 
 ### 10.4 梯度与模块影响
 
 | 模块 | 监督来源 | 主要影响 |
 |---|---|---|
-| Speech Head | mode/codec loss | speech mode、codec 和局部连续性 |
+| Speech Head | codec loss | codec、静音保真和局部连续性 |
 | Perceiver | Speech/RL、JEPA source | 多模态观察表示 |
 | JEPA Head | JEPA | 从 H 预测单步未来表示 |
 | Backbone | Speech/RL、JEPA source | 共享多模态表示与状态转移 |
@@ -419,7 +420,7 @@ future Speech loss
  -> earlier C / RecentKV / SlowMemory
 ```
 
-TBPTT 不能短于要验证的 memory horizon；Canary 使用 375 units。
+TBPTT 不能短于要验证的 memory horizon；Canary 使用 150 units。
 
 ### 10.6 Lookahead 与参数版本
 
@@ -491,7 +492,7 @@ CUDA、FP16、codec worker、checkpoint 原子写入和 W&B Local/Offline 可用
 
 ### 14.2 数据与协议
 
-StreamUnit shape、80 ms 时钟、mask、manifest/shard identity、runtime identity、codec identity、model schema 和 split isolation 通过。
+StreamUnit shape、200 ms 时钟、mask、manifest/shard identity、runtime identity、codec identity、model schema 和 split isolation 通过。
 
 ### 14.3 状态闭环
 
@@ -530,7 +531,7 @@ RecentKV 长度不超过配置上限；淘汰只发生在完整 unit 边界；C/
 
 ```text
 chronological WebDataset episodes
--> StreamUnit(80 ms mixed mic + video)
+-> StreamUnit(200 ms mixed mic + video)
 -> Perceiver(O_t) = P_t
 -> Backbone(P_t, H_(t-1), C_(t-1), RecentKV_(t-1), SlowMemory_(t-1))
 -> H_t, C_t, RecentKV_t, SlowMemory_t

@@ -1,0 +1,18 @@
+[project]
+name = "avm-native-speech-worker"
+version = "0.1.0"
+description = "Isolated real Token2Wav qualification runtime for AVM"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "huggingface-hub==0.36.2",
+  "numpy==1.26.4",
+  "omegaconf>=2.3,<3",
+  "soundfile==0.14.0",
+  "stepaudio2-minicpmo==0.1.1",
+  "torch==2.9.1",
+  "torchaudio==2.9.1",
+  "transformers==4.51.3",
+]
+
+[tool.uv]
+package = false

@@ -34,16 +34,19 @@ def test_avm_has_no_action_parameters_states_targets_or_outputs(smoke_config) ->
     assert not hasattr(generated.output, "action")
 
 
-def test_silent_policy_probability_excludes_codec(smoke_config) -> None:
+def test_every_unit_policy_probability_includes_five_acoustic_codes(smoke_config) -> None:
     from model import SpeechSamplingConfig
 
     model = StreamingLatentLoop(smoke_config.model).eval()
     unit = SyntheticEpisodeDataset(smoke_config.data, smoke_config.model).make_episode(0).units[0]
     output = model(unit.observation, model.initial_state(1, "cpu"), unit.speech_codes)
-    mode = torch.zeros(1, dtype=torch.long)
     sampling = SpeechSamplingConfig(temperature=0.8, top_k=0)
-    actual = _policy_logprobs(output, mode, unit.speech_codes, sampling)
-    expected = torch.log_softmax(output.speech_mode_logits / 0.8, -1)[:, 0]
+    actual = _policy_logprobs(output, unit.speech_codes, sampling)
+    logits = output.speech_codec_logits[:, :, 0].clone() / 0.8
+    logits[..., -1] = -torch.inf
+    expected = torch.log_softmax(logits, -1).gather(
+        -1, unit.speech_codes[..., 0, None]
+    ).squeeze(-1).sum(-1)
     assert torch.allclose(actual, expected)
 
 
@@ -87,7 +90,7 @@ def test_reward_has_no_action_efficiency() -> None:
 
 def test_formal_harness_has_no_fixture_device_fallback() -> None:
     with pytest.raises(ValueError, match="real dialogue"):
-        create_backend({"protocol_version": "avm-realtime-v1"})
+        create_backend({"protocol_version": "avm-realtime-v2"})
 
 
 def test_legacy_action_configuration_is_rejected() -> None:
@@ -106,10 +109,10 @@ def test_video_changes_fused_hidden_for_identical_audio(smoke_config) -> None:
         first = model(unit.observation, state, unit.speech_codes)
         second = model(alternate.observation, state, alternate.speech_codes)
     assert not torch.allclose(first.hidden, second.hidden)
-    assert not torch.allclose(first.speech_mode_logits, second.speech_mode_logits)
+    assert not torch.allclose(first.speech_codec_logits, second.speech_codec_logits)
 
 
-def test_silence_discards_queued_speech_and_allows_resuming() -> None:
+def test_external_cancel_discards_queued_speech_and_old_epochs() -> None:
     class Sink:
         def __init__(self):
             self.entered = threading.Event()
@@ -130,7 +133,7 @@ def test_silence_discards_queued_speech_and_allows_resuming() -> None:
 
     sink = Sink()
     playback = BoundedPlayback(sink, capacity=2)
-    pcm = np.zeros(1920, dtype=np.float32).tobytes()
+    pcm = np.zeros(4800, dtype=np.float32).tobytes()
     try:
         playback.submit(ActuationSignal("s", 0, SpeechSignal(pcm)))
         assert sink.entered.wait(2)
@@ -139,10 +142,12 @@ def test_silence_discards_queued_speech_and_allows_resuming() -> None:
         with pytest.raises(RuntimeError, match="budget"):
             playback.submit(ActuationSignal("s", 3, SpeechSignal(pcm)))
         sink.release.set()
-        playback.submit(ActuationSignal("s", 3, SpeechSignal(pcm, silent=True)))
+        playback.cancel(1)
         assert sink.interrupts == 1
         assert not playback._pending
-        playback.submit(ActuationSignal("s", 4, SpeechSignal(pcm)))
+        playback.submit(ActuationSignal("s", 4, SpeechSignal(pcm), generation_epoch=0))
+        assert not playback._pending
+        playback.submit(ActuationSignal("s", 5, SpeechSignal(pcm), generation_epoch=1))
     finally:
         playback.close()
 
@@ -159,7 +164,7 @@ def test_shared_video_normalization_supports_rgba_and_arbitrary_resolution() -> 
     image = np.zeros((16, 32, 4), dtype=np.uint8)
     image[..., 0] = 255
     result = video_tensor(VideoSignal(image.tobytes(), 32, 16, 0, 0, pixel_format="rgba32"))
-    assert result.shape == (1, 3, 224, 224)
+    assert result.shape == (1, 3, 322, 630)
     assert torch.allclose(result[:, 0], torch.ones_like(result[:, 0]))
     assert result[:, 1:].count_nonzero() == 0
 
@@ -186,7 +191,7 @@ def test_explicit_weight_migration_starts_new_lineage(tmp_path, smoke_config) ->
         initialize_exact_weights(model, source)
     output = migrate_latentloop_weights(smoke_config, source, tmp_path / "avm.pt")
     imported = torch.load(output, weights_only=False)
-    assert imported["metadata"]["model_schema_id"] == "avm-model-v2"
+    assert imported["metadata"]["model_schema_id"] == "avm-model-v3"
     assert imported["metadata"]["parent_sha256"] == file_sha256(source)
     assert imported["recurrent_state"] is None
     assert imported["train_state"]["update"] == 0
@@ -204,7 +209,7 @@ def test_live_conversation_closes_sessions_on_inference_failure() -> None:
 
     class Model:
         def identity(self):
-            return {"protocol_version": "avm-realtime-v1"}
+            return {"protocol_version": "avm-realtime-v2"}
 
         def open_session(self, session_id):
             return session_id

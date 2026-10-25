@@ -13,9 +13,9 @@
 scenario_id + real audiovisual sources
   -> start_lifetime_session
   -> expert speech PCM -> bounded playback -> mixed microphone feedback
-  -> every 80 ms: mixed mic + causal video + time
+  -> every 200 ms: mixed mic + causal video + time
   -> append observation/speech/receipt hash chain
-  -> seal -> Mimi encode -> AVM WebDataset
+  -> seal -> 原生声学 encode -> AVM WebDataset
 ```
 
 单一 lifetime 内 observation、speech、receipt 与下一 observation 按 unit 连续记录。
@@ -35,14 +35,16 @@ scenario_id + real audiovisual sources
   sealed.json
 ```
 
-`transitions.jsonl` 保存 unit、payload SHA-256、前序/当前 hash chain和 speech 静音标记。protobuf payload 保存 canonical observation、实际 actuation 和 Harness receipt。`sealed.json` 只有在 unit 连续且存在至少一个完整 transition 时生成。
+`transitions.jsonl`保存unit、payload SHA-256、前序/当前hash chain及PCM存在标记。
+protobuf保存canonical observation、实际actuation和receipt；静音PCM不同于无PCM的预热。
+`sealed.json`只有在unit连续且存在至少一个完整transition时生成。
 
 ## 训练导出
 
-episode_from_capture 转换为 Episode/StreamUnit，沿用 WebDataset、Mimi、manifest、audit 和
-readiness。输入仅含 mixed mic、video 和 time；目标语音只用于编码与监督。
-语音 mode/codec masks 按实际专家语音设置，receipt 和设备诊断仅属于原始 ledger 审计。
-导出 identity 为 avm-episode-v1 / avm-realtime-v1，禁止动作标签。
+episode_from_capture 转换为 Episode/StreamUnit，沿用 WebDataset、原生声学、manifest、audit 和
+readiness。模型输入仅含mixed mic与video；时间为对齐元数据，目标语音仅用于编码和监督。
+codec mask按输出来源unit是否有真实目标设置，静音保持监督；receipt和设备诊断属于审计。
+导出 identity 为 avm-episode-v2 / avm-realtime-v2，禁止动作标签。
 
 ## 接口与失败策略
 
@@ -51,7 +53,7 @@ readiness。输入仅含 mixed mic、video 和 time；目标语音只用于编�
 - finish(metadata) 验证时序、身份并封存；未封存目录不得进入 manifest。
 - 设备、协议、顺序、音频或视频失败立即停止，不回退 fixture。
 
-JSONL 每行提供 speech_pcm_b64 和 speech_silent；静音必须提供全零 80 ms PCM。
+JSONL每行提供speech_pcm_b64；已知目标静音也提供200 ms PCM，不增加静音分类字段。
 
 ```bash
 uv run data capture --config configs/canary.yaml \
@@ -68,5 +70,5 @@ uv run data capture --config configs/canary.yaml \
 ## 运行与验收
 
 先配置真实对话设备和 scenario，再启动 harness serve。摄像头或共享视频的查看由采集端
-应用负责，不依赖 QEMU/SPICE。验收 80 ms/24 kHz 对齐、连续证据链、语音/receipt identity、
+应用负责，不依赖 QEMU/SPICE。验收 200 ms/24 kHz 对齐、连续证据链、语音/receipt identity、
 播放回流延迟、视频复用与失效、插话时及时停止，以及结束后的线程与进程清理。

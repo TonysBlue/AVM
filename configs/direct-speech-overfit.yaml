@@ -1,62 +1,85 @@
 model:
-  model_dim: 512
-  num_layers: 8
-  num_heads: 8
-  ffn_dim: 2048
-  audio_tokens: 4
+  model_dim: 4096
+  num_layers: 36
+  num_heads: 32
+  ffn_dim: 12288
+  audio_tokens: 2
   audio_kernel: 400
   audio_stride: 160
-  vision_tokens: 16
-  perceiver_slots: 16
+  vision_tokens: 64
+  perceiver_slots: 64
   perceiver_layers: 2
   jepa_layers: 2
-  semantic_memory_slots: 8
+  semantic_memory_slots: 16
   slow_memory_type: gated_delta
   rematerialization_segment_units: 16
-  kv_units: 750
-  kv_window_ms: 60000
-  speech_frames_per_unit: 1
-  speech_codebooks: 8
-  speech_codebook_size: 2048
-  speech_depth_layers: 2
-  speech_depth_heads: 4
-  speech_depth_ffn_dim: 1024
+  kv_units: 150
+  kv_window_ms: 30000
+  speech_frames_per_unit: 5
+  speech_codebooks: 1
+  speech_codebook_size: 6562
+  speech_depth_layers: 20
+  speech_depth_heads: 12
+  speech_depth_ffn_dim: 3072
   dropout: 0.0
-  activation_checkpointing: false
+  activation_checkpointing: true
+  kv_heads: 8
+  audio_dim: 1024
+  audio_layers: 24
+  audio_heads: 16
+  audio_ffn_dim: 4096
+  audio_cache_frames: 1500
+  vision_dim: 1152
+  vision_layers: 27
+  vision_heads: 16
+  vision_ffn_dim: 4304
+  vision_patch_size: 14
+  vision_position_grid: 70
+  perceiver_dim: 2048
+  perceiver_heads: 16
+  perceiver_ffn_dim: 8192
+  jepa_dim: 1024
+  jepa_heads: 16
+  jepa_ffn_dim: 4096
+  speech_dim: 768
+  speech_window_units: 10
+  native_source_lock: ~/latentloop-data/models/minicpm-o-4_5/eb4141de24550a3a1a4082f718be58f46b761728/source-lock.json
+  native_qualification: ~/latentloop-data/models/minicpm-o-4_5/eb4141de24550a3a1a4082f718be58f46b761728/qualification/qualification.json
 data:
   dataset: direct-speech-overfit
   source: webdataset
   shards: ~/latentloop-data/datasets/gates/direct-speech-overfit/shards/processed/train/train-*.tar
   manifest: ~/latentloop-data/datasets/gates/direct-speech-overfit/shards/processed/train/train-manifest.jsonl
-  audio_sample_rate: 24000
-  codec_frame_rate: 12.5
-  codec_id: mimi-24khz-8x2048
-  codec_weight_hash: 09b782f0629851a271227fb9d36db65c041790365f11bbe5d3d59369cf863f50
-  codec_revision: a49141e28b3d9c947cf9aa5314431e1b11cbd2f5
-  codec_codebooks: 8
-  codec_codebook_size: 2048
-  unit_ms: 80
-  unit_audio_samples: 1920
-  video_height: 224
-  video_width: 224
+  audio_sample_rate: 16000
+  codec_frame_rate: 25.0
+  codec_id: minicpm-o-4_5-s3-25hz
+  codec_weight_hash: d43342aa12163a80bf07bffb94c9de2e120a8df2f9917cd2f642e7f4219c6f71
+  codec_revision: eb4141de24550a3a1a4082f718be58f46b761728
+  codec_codebooks: 1
+  codec_codebook_size: 6562
+  unit_ms: 200
+  unit_audio_samples: 3200
+  video_height: 448
+  video_width: 448
   episode_units: 16
   train_episodes: 32
   seed: 17
 training:
+  devices: [cuda:0, cuda:1, cuda:2, cuda:3, cuda:4, cuda:5, cuda:6, cuda:7]
   max_updates: 256
   weight_decay: 0.01
   gradient_accumulation_steps: 1
   tbptt_units: 16
-  mixed_precision: fp16
+  mixed_precision: bf16
   max_grad_norm: 1.0
   checkpoint_every: 256
   log_every: 8
   head_learning_rate: 0.001
-  backbone_learning_rate: 0.00003
+  backbone_learning_rate: 3.0e-05
   warmup_ratio: 0.03
   codec_scheduled_sampling: 0.0
   codec_scheduled_sampling_start: 0.7
-  backbone_train_mode: frozen
+  backbone_train_mode: all
   speech_loss_weight: 1.0
   jepa_loss_weight: 1.0
   memory_horizon_units: 16
