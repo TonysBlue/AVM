@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import math
-
 import torch
 from torch import Tensor, nn
 
@@ -54,29 +52,3 @@ class VisionEncoder(nn.Module):
             batch, channels, 4, height // 4, 4, width // 4
         ).mean(dim=(3, 5))
         return features.flatten(2).transpose(1, 2) + self.position
-
-
-class DeltaTimeEncoder(nn.Module):
-    def __init__(self, dim: int, bands: int = 8, base_period_ms: int = 80) -> None:
-        super().__init__()
-        if bands < 1 or base_period_ms < 1:
-            raise ValueError("delta time Fourier bands and base period must be positive")
-        self.bands = bands
-        self.base_period_ms = base_period_ms
-        periods = base_period_ms * (2.0 ** torch.arange(bands))
-        self.register_buffer("periods_ms", periods, persistent=False)
-        self.network = nn.Sequential(
-            nn.Linear(1 + 2 * bands, dim), nn.SiLU(), nn.Linear(dim, dim)
-        )
-
-    def forward(self, delta_ms: Tensor) -> Tensor:
-        if delta_ms.ndim != 1:
-            raise ValueError("delta_ms must have shape [B]")
-        if torch.any(delta_ms <= 0):
-            raise ValueError("delta_ms must be positive")
-        dtype = self.network[0].weight.dtype
-        delta = delta_ms.to(dtype=dtype)
-        log_delta = torch.log1p(delta / float(self.base_period_ms))[:, None]
-        phase = 2.0 * math.pi * delta[:, None] / self.periods_ms.to(dtype=dtype)[None]
-        features = torch.cat((log_delta, phase.sin(), phase.cos()), dim=-1)
-        return self.network(features)[:, None]

@@ -81,7 +81,7 @@ def test_speech_policy_logprob_is_the_joint_mode_and_codec_probability(
     codes = unit.speech_codes
     sampling = SpeechSamplingConfig(temperature=0.8, top_k=0)
     output = model.forward_step(
-        unit,
+        unit.observation,
         model.initial_state(1, "cpu"),
         speech_teacher_codes=codes,
         speech_teacher_mode=mode,

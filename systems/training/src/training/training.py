@@ -88,7 +88,7 @@ def _sequence_jepa_loss(
     if lookahead is not None:
         if lookahead_audio_cache is None:
             raise ValueError("JEPA lookahead requires the segment-end audio cache")
-        target, _ = model.encode_observation(lookahead, lookahead_audio_cache.clone())
+        target, _ = model.encode_observation(lookahead.observation, lookahead_audio_cache.clone())
         predicted.append(outputs[-1].jepa_prediction)
         sources.append(outputs[-1].perceiver_slots)
         targets.append(target)
@@ -123,7 +123,7 @@ def _rematerialized_segment(
             units, teacher_codes, strict=True
         ):
             output = model(
-                unit,
+                unit.observation,
                 current,
                 codes,
                 speech_teacher_mode=unit.speech_mode,
@@ -763,7 +763,7 @@ def initialize_exact_weights(model: StreamingLatentLoop, path: str | Path) -> No
     metadata = payload.get("metadata")
     if not isinstance(metadata, dict):
         raise ValueError("initial checkpoint metadata is incomplete")
-    if metadata.get("model_schema_id") != "avm-model-v1":
+    if metadata.get("model_schema_id") != "avm-model-v2":
         raise ValueError("initial checkpoint AVM model schema is incompatible")
     source = payload.get("model")
     if not isinstance(source, dict):
@@ -1163,7 +1163,7 @@ def _train_ppo_candidate(
         for item in units:
             stream_unit = observation_to_stream_unit(item.observation, config).to(device)
             output = candidate.forward_step(
-                stream_unit,
+                stream_unit.observation,
                 post_state,
                 speech_teacher_codes=item.codes.to(device),
                 speech_teacher_mode=item.mode.to(device),
@@ -1475,7 +1475,7 @@ def train_online_ppo(
                 terminal_units.add(event.outcome_unit)
         unit = observation_to_stream_unit(observation, config).to(device)
         with torch.no_grad():
-            generated = policy.generate_step(unit, policy_state, sampling)
+            generated = policy.generate_step(unit.observation, policy_state, sampling)
             policy_state = generated.output.state
             mode, codes = (
                 generated.speech_mode,
@@ -1485,7 +1485,7 @@ def train_online_ppo(
                 generated.output, mode, codes, sampling
             )
             reference_output = reference.forward_step(
-                unit,
+                unit.observation,
                 reference_state,
                 speech_teacher_codes=codes,
                 speech_teacher_mode=mode,
@@ -1613,7 +1613,7 @@ def train_online_ppo(
                 ).hexdigest()
                 with torch.no_grad():
                     bootstrap_value = policy.forward_step(
-                        observation_to_stream_unit(observation, config).to(device),
+                        observation_to_stream_unit(observation, config).to(device).observation,
                         policy_state,
                     ).value.cpu()
                 pending_units: list[_PPOUnit] = []

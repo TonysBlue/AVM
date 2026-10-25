@@ -18,7 +18,7 @@ def test_recurrent_state_is_bounded_and_heads_receive_gradients(
     total = torch.tensor(0.0)
     output = None
     for unit in episode.units:
-        output = model(unit, state, unit.speech_codes)
+        output = model(unit.observation, state, unit.speech_codes)
         state = output.state
         total = total + compute_losses(output, unit)["total"]
 
@@ -45,7 +45,7 @@ def test_recurrent_state_is_bounded_and_heads_receive_gradients(
 def test_training_value_head_receives_policy_value_gradient(smoke_config: ProjectConfig) -> None:
     model = StreamingLatentLoop(smoke_config.model)
     unit = SyntheticEpisodeDataset(smoke_config.data, smoke_config.model).make_episode(0).units[0]
-    output = model(unit, model.initial_state(1, "cpu"), unit.speech_codes)
+    output = model(unit.observation, model.initial_state(1, "cpu"), unit.speech_codes)
 
     output.value.square().mean().backward()
 
@@ -60,8 +60,8 @@ def test_semantic_slots_are_backbone_state_but_not_recent_kv(smoke_config: Proje
     altered.semantic_memory = altered.semantic_memory + 1.0
 
     with torch.no_grad():
-        baseline = model(unit, initial, unit.speech_codes)
-        changed = model(unit, altered, unit.speech_codes)
+        baseline = model(unit.observation, initial, unit.speech_codes)
+        changed = model(unit.observation, altered, unit.speech_codes)
 
     assert not torch.equal(baseline.hidden, changed.hidden)
     expected_cached = smoke_config.model.perceiver_slots
@@ -72,7 +72,7 @@ def test_semantic_slots_are_backbone_state_but_not_recent_kv(smoke_config: Proje
 def test_detach_breaks_tbptt_graph(smoke_config: ProjectConfig) -> None:
     model = StreamingLatentLoop(smoke_config.model)
     unit = SyntheticEpisodeDataset(smoke_config.data, smoke_config.model).make_episode(0).units[0]
-    state = model(unit, model.initial_state(1, "cpu")).state.detach()
+    state = model(unit.observation, model.initial_state(1, "cpu")).state.detach()
     assert state.semantic_memory.grad_fn is None
     assert all(memory.matrix.grad_fn is None for memory in state.slow_memory)
     assert all(cache.key.grad_fn is None for cache in state.layer_kv)
@@ -82,7 +82,7 @@ def test_activation_checkpointing_supports_backward(smoke_config: ProjectConfig)
     smoke_config.model.activation_checkpointing = True
     model = StreamingLatentLoop(smoke_config.model)
     unit = SyntheticEpisodeDataset(smoke_config.data, smoke_config.model).make_episode(0).units[0]
-    output = model(unit, model.initial_state(1, "cpu"), unit.speech_codes)
+    output = model(unit.observation, model.initial_state(1, "cpu"), unit.speech_codes)
 
     compute_losses(output, unit)["total"].backward()
 
@@ -92,7 +92,7 @@ def test_activation_checkpointing_supports_backward(smoke_config: ProjectConfig)
 def test_speech_loss_averages_over_valid_codec_tokens(smoke_config: ProjectConfig) -> None:
     model = StreamingLatentLoop(smoke_config.model)
     unit = SyntheticEpisodeDataset(smoke_config.data, smoke_config.model).make_episode(0).units[0]
-    output = model(unit, model.initial_state(1, "cpu"), unit.speech_codes)
+    output = model(unit.observation, model.initial_state(1, "cpu"), unit.speech_codes)
     output.speech_codec_logits = torch.zeros_like(output.speech_codec_logits)
     output.speech_mode_logits = torch.zeros_like(output.speech_mode_logits)
 
@@ -106,7 +106,7 @@ def test_speech_loss_follows_model_dtype(smoke_config: ProjectConfig) -> None:
     model = StreamingLatentLoop(smoke_config.model).half()
     unit = SyntheticEpisodeDataset(smoke_config.data, smoke_config.model).make_episode(0).units[0]
     unit = unit.to("cpu", dtype=torch.float16)
-    output = model(unit, model.initial_state(1, "cpu"), unit.speech_codes)
+    output = model(unit.observation, model.initial_state(1, "cpu"), unit.speech_codes)
 
     losses = compute_losses(output, unit)
 

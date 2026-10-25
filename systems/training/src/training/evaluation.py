@@ -59,7 +59,7 @@ def load_evaluation_model(
         raise ValueError("evaluation requires a complete current checkpoint")
     metadata = payload.get("metadata", {})
     for field, expected in (
-        ("model_schema_id", "avm-model-v1"),
+        ("model_schema_id", "avm-model-v2"),
         ("codec_id", config.data.codec_id),
         ("codec_weight_hash", config.data.codec_weight_hash),
         ("codec_revision", config.data.codec_revision),
@@ -108,7 +108,7 @@ def evaluate_checkpoint(
             for raw_unit in episode.units:
                 unit = raw_unit.to(selected_device, dtype=next(model.parameters()).dtype)
                 output = model(
-                    unit,
+                    unit.observation,
                     state,
                     unit.speech_codes,
                     speech_teacher_mode=unit.speech_mode,

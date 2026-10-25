@@ -14,17 +14,12 @@ def test_load_config_with_override() -> None:
     assert config.model.perceiver_layers == config.model.jepa_layers == 2
     assert config.data.unit_ms == 80
     assert config.data.codec_frame_rate == 12.5
-    assert config.model.delta_time_fourier_bands == 8
-    assert config.model.delta_time_base_period_ms == 80
+    assert not any(name.startswith("delta_time") for name in asdict(config.model))
 
 
-def test_world_state_and_delta_time_configuration_is_bounded() -> None:
+def test_world_state_configuration_is_bounded() -> None:
     config = load_config("configs/smoke.yaml")
     assert config.model.slow_memory_type == "gated_delta"
-    with pytest.raises(ValueError, match="Fourier bands"):
-        load_config("configs/smoke.yaml", ["model.delta_time_fourier_bands=0"])
-    with pytest.raises(ValueError, match="base period"):
-        load_config("configs/smoke.yaml", ["model.delta_time_base_period_ms=0"])
     with pytest.raises(ValueError, match="16 slots"):
         load_config("configs/smoke.yaml", ["model.perceiver_slots=8"])
 

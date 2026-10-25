@@ -10,6 +10,7 @@
 
 timeline 按 unit 保存 timestamps_ms、delta_ms、speech_mode、speech_mode_mask 和
 speech_codec_mask；video.npz 保存归一化视频，speech_codes.npy 保存 codec targets。
+时间字段仅用于对齐、审计和训练折扣；感知编码器仅接收 AudioVideoInput 的音视频张量。
 meta.json 必须包含 schema_id=avm-episode-v1，protocol_version=avm-realtime-v1。
 模型不接收动作、文本或额外音频参考通道。采集 ledger 的 receipts 与在线 RewardEvent
 只属于审计/训练控制面，不写入模型物理输入。processed sample 必须记录
@@ -54,7 +55,7 @@ receipt/reward 不进入 ObservationSignal，JEPA lookahead 不计入 PPO units�
 
 ## 3. Checkpoint identity
 
-checkpoint 使用 model_schema_id=avm-model-v1，并保存数据、codec、阶段与父 checkpoint
+checkpoint 使用 model_schema_id=avm-model-v2，并保存数据、codec、阶段与父 checkpoint
 身份。完整恢复检查配置哈希和严格 state-dict。旧 LatentLoop 权重仅能显式迁移到新谱系，
 不得继承动作状态、优化器或旧 rollout。
 

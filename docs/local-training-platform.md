@@ -271,16 +271,11 @@ $E_C$ 是学习到的初始语义槽位，只在 session 初始化时使用，�
 $C_t$ 和 SlowMemory 都没有独立 target、probe、write 或 diversity loss；未来行为损失沿
 递归图反向监督它们，JEPA loss 则从 H 侧训练可预测表示。
 
-### 7.4 DeltaTimeEncoder
+### 7.4 固定节拍与时间元数据
 
-`timestamp_ms` 不作为模型语义输入。只有当前观察间隔 `delta_ms` 经过 DeltaTimeEncoder 后
-进入 Backbone：
-
-$$
-T_t^{\Delta} = \mathrm{DeltaTimeEncoder}(\Delta t_t)
-$$
-
-语义 slots 和 SlowMemory updater 的接口不读取隐藏时间戳；$\Delta t_t$ 只随当前观测进入 Backbone。
+模型输入 AudioVideoInput 仅包含 mic_audio 和 video。StreamUnit 是训练数据封装，
+其中 timestamp_ms 和 delta_ms 仅为轨迹元数据，不进入感知编码器。模型固定每步 80 ms，
+通过顺序位置和循环状态表达时序；没有时间 token 或时间编码参数。
 
 ### 7.4 Speech Head
 

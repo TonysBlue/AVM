@@ -81,7 +81,7 @@ The final architecture has three runtime systems and shared packages:
 - `Model Core` is pure tensor/model code. It owns the `Z/H/KV` recurrent state,
   Backbone, Speech Head, and token sampling.
 - `Model Service` is the physical-signal inference boundary. It accepts mixed
-  microphone PCM, video pixels/revision, and time; it returns speech PCM.
+  microphone PCM and video pixels/revision with clock metadata; it returns speech PCM.
   It never captures devices.
 - `Training System` owns Pretrain, SFT, Online RL, replay, optimizer,
   checkpoint lineage, and evaluation. It uses the same Model Core as serving.
@@ -93,7 +93,7 @@ The final architecture has three runtime systems and shared packages:
 The Model Service data plane is strictly physical signals:
 
 ```text
-ObservationSignal: mic PCM + video pixels/revision + time
+ObservationSignal: mic PCM + video pixels/revision (clock fields are transport metadata)
 ActuationSignal:   speech PCM
 ```
 

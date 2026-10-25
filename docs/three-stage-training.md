@@ -31,7 +31,7 @@ Speech Head 是唯一生成输出头；JEPA 保留训练分支。RL 的 Value He
 
 | 阶段 | 数据来源 | 主要用途 |
 |---|---|---|
-| Pretrain | 广覆盖多模态监督 episode | 学习音频、视频、时间、音视频关联和状态转移的通用规律 |
+| Pretrain | 广覆盖多模态监督 episode | 学习音频、视频、音视频关联和固定节拍状态转移的通用规律 |
 | SFT | 独立的高质量专家轨迹 | 学习可靠交互、语音响应、视觉指代和全双工轮次策略 |
 | Online RL | 当前 policy 在实时对话环境生命期时间线中的窗口 | 使用 Online Recurrent PPO，按感知 Reward Event、交互质量、延迟、效率和安全反馈优化策略 |
 
@@ -141,7 +141,7 @@ payload SHA-256；该 observation 只用于最后一个 source 的 JEPA target�
 
 ## 7. 当前 checkpoint 与阶段谱系
 
-checkpoint 明确使用 model_schema_id=avm-model-v1，metadata 至少包含：
+checkpoint 明确使用 model_schema_id=avm-model-v2，metadata 至少包含：
 
 ```text
 stage

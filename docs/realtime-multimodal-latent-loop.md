@@ -53,7 +53,7 @@ Harness 负责摄像头/视频流/屏幕共享、混合音频采集、播放回�
 Training 负责共享三阶段训练、评估与 checkpoint；Data 是共享持久化域。
 
 ```text
-Harness -> mic PCM + video pixels/revision + time -> Model Service
+Harness -> mic PCM + video pixels/revision (clock metadata) -> Model Service
 Harness <- speech PCM                          <- Model Service
 ```
 
@@ -131,7 +131,7 @@ ControlSignal、action-local state 以及 GUI 执行环境均退出当前协议�
 
 | 符号 | 含义 |
 |---|---|
-| $O_t$ | 当前混合音频、视频和时间观测 |
+| $O_t$ | 当前混合音频和视频观测 |
 | $P_t$ | $\mathrm{Perceiver}(O_t)$ 的 16 个多模态 slots |
 | $\widehat{P}_{t+1\mid t}$ | JEPAHead 对下一时刻 Perceiver slots 的预测 |
 | $\mathrm{RecentKV}_t$ | 有界逐层 Transformer Key/Value Cache |
@@ -200,7 +200,7 @@ episode/session 开始时：
 
 ### 5.1 Unit 格式
 
-每个 unit 的输入协议为：
+每个 unit 的数据封装如下；前两项为轨迹元数据，只有音视频进入模型感知编码器：
 
 ~~~
 timestamp_ms       [B] int64
@@ -213,10 +213,9 @@ delta_ms 必须为正，时间戳严格递增。
 
 ### 5.2 Perceiver 输入与输出
 
-音频、视觉和时间 stem 先组织为带模态与位置编码的输入序列：
+音频和视觉 stem 先组织为带模态与位置编码的输入序列：
 
 ~~~
-<TIME>
 <AUDIO_0> ... <AUDIO_N>
 <VISION_0> ... <VISION_15>
 ~~~
@@ -243,37 +242,27 @@ vocabulary           2048
 
 ### 5.4 多频率调度
 
-采集器可以高频采集音频和视频，编码器可以使用内部帧率，但主干状态转移和输出协议统一在 80 ms unit 上。任何降频、合并或背压都必须显式记录 delta_ms，并保持状态顺序。
+采集器可以高频采集音频和视频，编码器可以使用内部帧率，但主干状态转移和输出协议统一在 80 ms unit 上。背压不得合并模型 unit 或增大 delta_ms；队列有界，超时显式失败并记录 telemetry。
 
-### 5.5 时间间隔编码
+### 5.5 固定节拍与时间元数据
 
-模型不直接接收绝对时间。`timestamp_ms` 只用于 unit 排序、计算 `delta_ms`、延迟统计和
-轨迹记录。当前观察间隔通过 DeltaTimeEncoder 进入 Backbone：
+模型只接收混合麦克风音频和视频，不接收时间信号。每步固定为 80 ms，时序由连续
+unit、顺序位置和循环状态表达。没有时间 token、时间编码器或时间模态 embedding。
+`timestamp_ms`、`delta_ms` 和视频采集时间仅为传输、轨迹与训练元数据，用于排序、
+对齐、延迟审计及 PPO 时间折扣；进入感知编码器前构造仅含音视频的输入对象。
 
-$$
-T_t^{\Delta} = \mathrm{DeltaTimeEncoder}(\Delta t_t)
-$$
-
-DeltaTimeEncoder 使用 log-scaled interval 和多尺度 Fourier 特征：
-
-$$
-\phi_k(\Delta t) =
-\left[
-\sin\left(2\pi\frac{\Delta t}{p_k}\right),
-\cos\left(2\pi\frac{\Delta t}{p_k}\right)
-\right]
-$$
-
-其中周期集合默认为 `80, 160, 320, 640, 1280, 2560, 5120, 10240 ms`。时间间隔通过
-当前 $P_t$ 进入 Backbone，不要求 $C_t$ 或 SlowMemory 遵循物理微分方程。
+测试契约：相同音视频和循环状态在不同合法时间元数据下产生相同感知表示和模型输出；
+模型参数及配置不含时间分支；原有时钟校验、视频新鲜度及 PPO 时间折扣仍有效。
+音频/视觉模态 embedding 为两类，Perceiver 保持 16 slots。模型 schema 更新为
+`avm-model-v2`，旧 checkpoint 明确拒绝，不自动迁移权重。
 
 ## 6. 模型架构
 
 ```text
 MIC_MIXED --> Streaming Audio Encoder --┐
-SCREEN   --> Vision Encoder -----------+--> Perceiver --> P_t
-DELTA_T  --> DeltaTimeEncoder ---------┘                 |
-                                                         v
+VIDEO     --> Vision Encoder ----------┴--> Perceiver --> P_t
+                                                          |
+                                                          v
 H_(t-1), C_(t-1), RecentKV_(t-1), SlowMemory_(t-1)
                     --> Backbone --> H_t, C_t, RecentKV_t, SlowMemory_t
                                       |             |
@@ -517,7 +506,7 @@ $$
 
 ### 11.6 环境演化
 
-语音播放改变真实环境；其后续麦克风、视频和时间输入构成 O_(t+1)。
+语音播放改变真实环境；其后续麦克风和视频输入构成 O_(t+1)。
 模型不读取隐藏的执行成功标签，也不把 $U_t$ 作为显式 JEPAHead 条件。
 
 ## 12. 上下文管理
@@ -552,7 +541,7 @@ unit cursor。会话持久化必须记录当前 model、codec 和 model identity
 ~~~
 Audio Capture       音频环形缓冲
 Screen Capture      每 unit 完整视频帧
-Perceiver           音频/视觉/时间 stem 与 16-slot 感知编码
+Perceiver           音频/视觉 stem 与 16-slot 感知编码
 Backbone Worker     Backbone、C/RecentKV/SlowMemory 状态
 Speech Worker       codec frame 和播放块
 Telemetry           延迟、队列、状态和轨迹
@@ -567,7 +556,7 @@ Telemetry           延迟、队列、状态和轨迹
 
 当计算延迟超过实时 tick：
 
-- 音频块可以合并，但必须更新 delta_ms；
+- 音频保持每块 80 ms，队列有界，溢出或超时显式失败；
 - 视觉按 unit 输入当前完整帧；低帧率复用最近因果帧，超时报错并记录 telemetry；
 - 超时、取消和紧急停止优先级最高；
 - 任何丢帧、时间跳跃或 worker 错误都写入 telemetry。
@@ -887,6 +876,6 @@ Harness 拥有设备采集与播放生命周期，Model Service 无电脑控制�
 ## 26. 最终架构定义
 
 AVM = Audio-Video Model without Text，是基于 LatentLoop 裁剪动作后的通用实时
-全双工 Omni 对话模型。单路混合音频、一路视频与时间经编码器、循环主干和长期记忆，
+全双工 Omni 对话模型。单路混合音频和一路视频经编码器、循环主干和长期记忆，
 直接生成语音 codec tokens。共享训练入口执行 Pretrain → SFT → Online Recurrent PPO。
 保持最终语义一致，不保留动作占位头、GUI 任务或文字中间推理通道。

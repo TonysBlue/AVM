@@ -31,8 +31,8 @@ def test_later_teacher_codebooks_do_not_change_earlier_logits(
     changed_codes = first_codes.clone()
     changed_codes[:, :, 0] = (changed_codes[:, :, 0] + 1) % 32
 
-    first = model(unit, state, first_codes).speech_codec_logits
-    changed = model(unit, state, changed_codes).speech_codec_logits
+    first = model(unit.observation, state, first_codes).speech_codec_logits
+    changed = model(unit.observation, state, changed_codes).speech_codec_logits
 
     assert torch.equal(first[:, :, 0], changed[:, :, 0])
     assert not torch.equal(first[:, :, 1], changed[:, :, 1])
@@ -44,7 +44,7 @@ def test_generate_step_returns_one_complete_codec_frame(
     model = StreamingLatentLoop(smoke_config.model).eval()
     unit = SyntheticEpisodeDataset(smoke_config.data, smoke_config.model).make_episode(0).units[0]
     generated = model.generate_step(
-        unit,
+        unit.observation,
         model.initial_state(1, "cpu"),
         SpeechSamplingConfig(greedy=True),
     )

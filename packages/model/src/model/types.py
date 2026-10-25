@@ -14,6 +14,14 @@ class SpeechMode(IntEnum):
     SPEECH = 1
 
 
+@dataclass(frozen=True, slots=True)
+class AudioVideoInput:
+    """Physical model inputs, without clock or training metadata."""
+
+    mic_audio: Tensor
+    video: Tensor
+
+
 @dataclass(slots=True)
 class StreamUnit:
     """One batched, time-aligned multimodal training unit."""
@@ -26,6 +34,10 @@ class StreamUnit:
     speech_mode_mask: Tensor
     speech_codes: Tensor
     speech_codec_mask: Tensor
+
+    @property
+    def observation(self) -> AudioVideoInput:
+        return AudioVideoInput(mic_audio=self.mic_audio, video=self.video)
 
     @property
     def batch_size(self) -> int:

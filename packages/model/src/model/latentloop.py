@@ -6,10 +6,11 @@ from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
 from model.attention import SlowMemory, StreamingTransformerLayer
-from model.encoders import DeltaTimeEncoder, StreamingAudioEncoder, VisionEncoder
+from model.encoders import StreamingAudioEncoder, VisionEncoder
 from model.perceiver import JEPAHead, Perceiver
 from model.speech import FactorizedSpeechHead
 from model.types import (
+    AudioVideoInput,
     GenerationOutput,
     LayerKV,
     RecurrentState,
@@ -18,7 +19,6 @@ from model.types import (
     SpeechMode,
     SpeechSamplingConfig,
     StepOutput,
-    StreamUnit,
 )
 from model.value import ValueHead
 
@@ -34,12 +34,7 @@ class StreamingLatentLoop(nn.Module):
             dim, config.audio_tokens, config.audio_kernel, config.audio_stride
         )
         self.vision_encoder = VisionEncoder(dim)
-        self.delta_time_encoder = DeltaTimeEncoder(
-            dim,
-            bands=config.delta_time_fourier_bands,
-            base_period_ms=config.delta_time_base_period_ms,
-        )
-        self.type_embedding = nn.Embedding(3, dim)
+        self.type_embedding = nn.Embedding(2, dim)
         self.perceiver = Perceiver(
             dim,
             config.num_heads,
@@ -128,16 +123,16 @@ class StreamingLatentLoop(nn.Module):
             unit_index=torch.zeros(batch_size, device=device, dtype=torch.long),
         )
 
-    def encode_observation(self, unit: StreamUnit, audio_cache: Tensor) -> tuple[Tensor, Tensor]:
+    def encode_observation(
+        self, unit: AudioVideoInput, audio_cache: Tensor
+    ) -> tuple[Tensor, Tensor]:
         """Encode an observation without advancing any cognitive recurrent state."""
         audio, next_audio_cache = self.audio_encoder(unit.mic_audio, audio_cache)
         vision = self.vision_encoder(unit.video)
-        delta_time = self.delta_time_encoder(unit.delta_ms)
         inputs = torch.cat(
             (
-                delta_time + self.type_embedding.weight[0],
-                audio + self.type_embedding.weight[1],
-                vision + self.type_embedding.weight[2],
+                audio + self.type_embedding.weight[0],
+                vision + self.type_embedding.weight[1],
             ),
             dim=1,
         )
@@ -145,7 +140,7 @@ class StreamingLatentLoop(nn.Module):
 
     def forward_step(
         self,
-        unit: StreamUnit,
+        unit: AudioVideoInput,
         state: RecurrentState,
         *,
         speech_teacher_codes: Tensor | None = None,
@@ -252,7 +247,7 @@ class StreamingLatentLoop(nn.Module):
 
     def forward(
         self,
-        unit: StreamUnit,
+        unit: AudioVideoInput,
         state: RecurrentState,
         speech_teacher_codes: Tensor | None = None,
         *,
@@ -267,7 +262,10 @@ class StreamingLatentLoop(nn.Module):
 
     @torch.no_grad()
     def generate_step(
-        self, unit: StreamUnit, state: RecurrentState, sampling: SpeechSamplingConfig | None = None
+        self,
+        unit: AudioVideoInput,
+        state: RecurrentState,
+        sampling: SpeechSamplingConfig | None = None,
     ) -> GenerationOutput:
         output = self.forward_step(unit, state, sampling=sampling)
         return GenerationOutput(

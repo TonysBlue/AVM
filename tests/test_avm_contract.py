@@ -26,7 +26,7 @@ def frame(timestamp: int = 0, revision: int = 0) -> VideoSignal:
 def test_avm_has_no_action_parameters_states_targets_or_outputs(smoke_config) -> None:
     model = StreamingLatentLoop(smoke_config.model)
     unit = SyntheticEpisodeDataset(smoke_config.data, smoke_config.model).make_episode(0).units[0]
-    generated = model.generate_step(unit, model.initial_state(1, "cpu"))
+    generated = model.generate_step(unit.observation, model.initial_state(1, "cpu"))
     assert not any("action" in name for name, _ in model.named_parameters())
     for cls in (RecurrentState, StreamUnit, ActuationSignal):
         assert not any("action" in field.name or field.name == "controls" for field in fields(cls))
@@ -39,7 +39,7 @@ def test_silent_policy_probability_excludes_codec(smoke_config) -> None:
 
     model = StreamingLatentLoop(smoke_config.model).eval()
     unit = SyntheticEpisodeDataset(smoke_config.data, smoke_config.model).make_episode(0).units[0]
-    output = model(unit, model.initial_state(1, "cpu"), unit.speech_codes)
+    output = model(unit.observation, model.initial_state(1, "cpu"), unit.speech_codes)
     mode = torch.zeros(1, dtype=torch.long)
     sampling = SpeechSamplingConfig(temperature=0.8, top_k=0)
     actual = _policy_logprobs(output, mode, unit.speech_codes, sampling)
@@ -103,8 +103,8 @@ def test_video_changes_fused_hidden_for_identical_audio(smoke_config) -> None:
     alternate = replace(unit, video=torch.ones_like(unit.video))
     state = model.initial_state(1, "cpu")
     with torch.no_grad():
-        first = model(unit, state, unit.speech_codes)
-        second = model(alternate, state, alternate.speech_codes)
+        first = model(unit.observation, state, unit.speech_codes)
+        second = model(alternate.observation, state, alternate.speech_codes)
     assert not torch.allclose(first.hidden, second.hidden)
     assert not torch.allclose(first.speech_mode_logits, second.speech_mode_logits)
 
@@ -186,7 +186,7 @@ def test_explicit_weight_migration_starts_new_lineage(tmp_path, smoke_config) ->
         initialize_exact_weights(model, source)
     output = migrate_latentloop_weights(smoke_config, source, tmp_path / "avm.pt")
     imported = torch.load(output, weights_only=False)
-    assert imported["metadata"]["model_schema_id"] == "avm-model-v1"
+    assert imported["metadata"]["model_schema_id"] == "avm-model-v2"
     assert imported["metadata"]["parent_sha256"] == file_sha256(source)
     assert imported["recurrent_state"] is None
     assert imported["train_state"]["update"] == 0

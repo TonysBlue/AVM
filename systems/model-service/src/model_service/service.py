@@ -45,7 +45,7 @@ class ModelService:
                 payload.get("metadata"), dict
             ):
                 raise ValueError("model service requires a complete current checkpoint")
-            if payload.get("metadata", {}).get("model_schema_id") != "avm-model-v1":
+            if payload.get("metadata", {}).get("model_schema_id") != "avm-model-v2":
                 raise ValueError("checkpoint AVM model schema does not match model service")
             weights = payload.get("model")
             if not isinstance(weights, dict):
@@ -60,7 +60,7 @@ class ModelService:
         return {
             "service": "model-service",
             "protocol_version": "avm-realtime-v1",
-            "model_schema_id": "avm-model-v1",
+            "model_schema_id": "avm-model-v2",
             "codec_id": self.config.data.codec_id,
         }
 
@@ -122,7 +122,7 @@ class ModelService:
             )
             unit = self._unit(observation).to(self.device)
             generated = self.model.generate_step(
-                unit,
+                unit.observation,
                 session.state,
                 SpeechSamplingConfig(temperature=0.8, top_k=250, greedy=False),
             )

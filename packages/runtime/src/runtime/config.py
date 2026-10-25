@@ -24,8 +24,6 @@ class ModelConfig:
     semantic_memory_slots: int = 8
     slow_memory_type: str = "gated_delta"
     rematerialization_segment_units: int = 32
-    delta_time_fourier_bands: int = 8
-    delta_time_base_period_ms: int = 80
     # The formal Canary profile retains the most recent 30 seconds.
     kv_units: int = 375
     kv_window_ms: int = 30_000
@@ -200,10 +198,6 @@ class ProjectConfig:
             raise ValueError("semantic_memory_slots must be positive")
         if self.model.rematerialization_segment_units < 1:
             raise ValueError("rematerialization segment must be positive")
-        if self.model.delta_time_fourier_bands < 1:
-            raise ValueError("delta time Fourier bands must be positive")
-        if self.model.delta_time_base_period_ms < 1:
-            raise ValueError("delta time base period must be positive")
         if self.data.dataset not in {
             "synthetic",
             "canary",

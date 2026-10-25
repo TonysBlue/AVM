@@ -17,6 +17,22 @@ from training.checkpoint import (
 from training.training import initialize_exact_weights
 
 
+def test_checkpoint_rejects_time_conditioned_model_schema() -> None:
+    from dataclasses import asdict
+
+    from training.checkpoint import _parse_metadata
+
+    metadata = asdict(CheckpointMetadata(
+        data_identity="test-data",
+        codec_id="test-codec",
+        codec_weight_hash="test-hash",
+        git_commit="test",
+    ))
+    metadata["model_schema_id"] = "avm-model-v1"
+    with pytest.raises(ValueError, match="schema.*incompatible"):
+        _parse_metadata(metadata)
+
+
 def test_checkpoint_restores_full_recurrent_step(
     tmp_path: Path, smoke_config: ProjectConfig
 ) -> None:
@@ -24,7 +40,7 @@ def test_checkpoint_restores_full_recurrent_step(
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
     episode = SyntheticEpisodeDataset(smoke_config.data, smoke_config.model).make_episode(0)
-    first = model(episode.units[0], model.initial_state(1, "cpu"))
+    first = model(episode.units[0].observation, model.initial_state(1, "cpu"))
     loss = compute_losses(first, episode.units[0])["total"]
     loss.backward()
     optimizer.step()
@@ -55,7 +71,9 @@ def test_checkpoint_restores_full_recurrent_step(
     assert "semantic_memory" in payload["recurrent_state"]
     assert "slow_memory" in payload["recurrent_state"]
     assert "delta_time_encoder_version" not in payload["metadata"]
-    expected = model(episode.units[1], first.state.detach()).speech_codec_logits.detach()
+    expected = model(
+        episode.units[1].observation, first.state.detach()
+    ).speech_codec_logits.detach()
 
     restored_model = StreamingLatentLoop(smoke_config.model)
     restored_optimizer = torch.optim.AdamW(restored_model.parameters(), lr=1e-3)
@@ -77,7 +95,7 @@ def test_checkpoint_restores_full_recurrent_step(
         ),
     )
     assert recurrent is not None
-    actual = restored_model(episode.units[1], recurrent).speech_codec_logits.detach()
+    actual = restored_model(episode.units[1].observation, recurrent).speech_codec_logits.detach()
     assert train_state["update"] == 1
     assert cursor.unit == 1
     assert metadata.codec_id == smoke_config.data.codec_id

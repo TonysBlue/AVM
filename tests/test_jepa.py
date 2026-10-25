@@ -36,7 +36,7 @@ def test_jepa_variance_uses_batch_time_samples() -> None:
 def test_behavior_and_jepa_gradients_follow_separate_jepa_paths(smoke_config) -> None:
     model = StreamingLatentLoop(smoke_config.model)
     units = SyntheticEpisodeDataset(smoke_config.data, smoke_config.model).make_episode(0).units
-    first = model(units[0], model.initial_state(1, "cpu"), units[0].speech_codes)
+    first = model(units[0].observation, model.initial_state(1, "cpu"), units[0].speech_codes)
 
     compute_losses(first, units[0])["total"].backward()
 
@@ -44,8 +44,8 @@ def test_behavior_and_jepa_gradients_follow_separate_jepa_paths(smoke_config) ->
     assert model.perceiver.queries.grad is not None
 
     model.zero_grad(set_to_none=True)
-    first = model(units[0], model.initial_state(1, "cpu"), units[0].speech_codes)
-    second = model(units[1], first.state, units[1].speech_codes)
+    first = model(units[0].observation, model.initial_state(1, "cpu"), units[0].speech_codes)
+    second = model(units[1].observation, first.state, units[1].speech_codes)
     jepa = compute_jepa_loss(
         first.jepa_prediction,
         first.perceiver_slots,
@@ -61,11 +61,13 @@ def test_behavior_and_jepa_gradients_follow_separate_jepa_paths(smoke_config) ->
 def test_perceiver_only_lookahead_does_not_advance_recurrent_state(smoke_config) -> None:
     model = StreamingLatentLoop(smoke_config.model)
     units = SyntheticEpisodeDataset(smoke_config.data, smoke_config.model).make_episode(0).units
-    output = model(units[0], model.initial_state(1, "cpu"))
+    output = model(units[0].observation, model.initial_state(1, "cpu"))
     state = output.state
     before = state.detach()
 
-    target, returned_cache = model.encode_observation(units[1], state.audio_cache.clone())
+    target, returned_cache = model.encode_observation(
+        units[1].observation, state.audio_cache.clone()
+    )
 
     assert target.shape == (1, 16, smoke_config.model.model_dim)
     assert returned_cache.shape == state.audio_cache.shape
@@ -82,7 +84,7 @@ def test_slow_memory_is_fixed_capacity(smoke_config) -> None:
     model = StreamingLatentLoop(smoke_config.model)
     unit = SyntheticEpisodeDataset(smoke_config.data, smoke_config.model).make_episode(0).units[0]
 
-    output = model(unit, model.initial_state(1, "cpu"))
+    output = model(unit.observation, model.initial_state(1, "cpu"))
 
     assert len(output.state.slow_memory) == smoke_config.model.num_layers
     assert len(model.slow_memories) == smoke_config.model.num_layers
@@ -136,7 +138,7 @@ def test_long_stream_keeps_recent_and_slow_memory_bounded(smoke_config) -> None:
 
     with torch.no_grad():
         for _ in range(smoke_config.model.kv_units * 3):
-            state = model(unit, state, unit.speech_codes).state
+            state = model(unit.observation, state, unit.speech_codes).state
 
     assert all(cache.key.shape[2] == expected_kv for cache in state.layer_kv)
     assert all(memory.normalizer.shape == expected_slow for memory in state.slow_memory)

@@ -224,7 +224,7 @@ def check_readiness(
             try:
                 payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
                 metadata = payload.get("metadata", {})
-                if metadata.get("model_schema_id") != "avm-model-v1":
+                if metadata.get("model_schema_id") != "avm-model-v2":
                     invalid.append("initial checkpoint is not an AVM model")
                 if metadata.get("codec_id") != config.data.codec_id:
                     invalid.append("initial checkpoint codec_id differs from Canary config")

@@ -13,8 +13,6 @@ model:
   semantic_memory_slots: 8
   slow_memory_type: gated_delta
   rematerialization_segment_units: 32
-  delta_time_fourier_bands: 8
-  delta_time_base_period_ms: 80
   kv_units: 375
   kv_window_ms: 30000
   speech_frames_per_unit: 1

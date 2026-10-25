@@ -70,7 +70,7 @@ close_lifetime_session(session_id)
 
 `EnvironmentIdentity` 包含 environment ID、version 和 protocol version。连接、reset 和每次 apply 都必须校验 session/task/unit 顺序。
 
-模型可见的 `ObservationSignal` 仅包含：
+传输层的 `ObservationSignal` 包含以下物理数据与时钟元数据：
 
 ```text
 timestamp_ms
@@ -78,6 +78,9 @@ delta_ms
 mixed_microphone[1920]
 video[3,224,224]
 ```
+
+timestamp_ms 和 delta_ms 仅用于时序审计和训练时间折扣。模型调用只传入
+AudioVideoInput 的 mixed microphone 和 video，不接收时间字段或时间 token。
 
 每个 unit 携带最新因果视频帧及采集时间/revision，低帧率复用，缺失或失效显式失败。
 

@@ -34,7 +34,7 @@ class CheckpointMetadata:
     parent_sha256: str | None = None
     stage: str = "pretrain"
     algorithm: str | None = None
-    model_schema_id: str = "avm-model-v1"
+    model_schema_id: str = "avm-model-v2"
     reference_checkpoint_sha256: str | None = None
     environment_id: str | None = None
     session_manifest_sha256: str | None = None
@@ -115,7 +115,7 @@ def _deserialize_state(
 def _parse_metadata(payload: Any) -> CheckpointMetadata:
     if not isinstance(payload, dict):
         raise ValueError("checkpoint metadata is incomplete")
-    if payload.get("model_schema_id") != "avm-model-v1":
+    if payload.get("model_schema_id") != "avm-model-v2":
         raise ValueError("checkpoint AVM model schema is missing or incompatible")
     if "objective" in payload:
         raise ValueError(
